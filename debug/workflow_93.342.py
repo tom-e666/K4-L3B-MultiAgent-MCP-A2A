@@ -73,9 +73,7 @@ PAYMENT_SKIP_TOPICS: set[str] = set()
 # but it does not support the late-delivery decision, so it is not cited in evidence_refs.
 # It stays in the trace as a consumed tool result.
 UNCITED_TOOLS = {"late_delivery_logistics": {"get_payment_timeline"},
-                 "late_delivery_seller": {"get_payment_timeline"},
-                 # Run 93.551: same treatment for unsupported_claim (evidence +1.34).
-                 "unsupported_claim": {"get_payment_timeline"}}
+                 "late_delivery_seller": {"get_payment_timeline"}}
 FETCH_ORDER = True  # run 90.14: evidence 88.39 -> 69.20, order is a required source
 # A captured payment with no completed refund in its timeline is reported as 0 refunded.
 REFUNDED_ZERO_WHEN_NONE = True
