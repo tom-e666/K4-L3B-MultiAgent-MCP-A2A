@@ -9,7 +9,11 @@ import pytest
 from student_agent import OUTPUT_SCHEMA_VERSION, VARIANT_ID
 from student_agent.cases import CaseSet, load_case_set
 from student_agent.contracts import Contracts
-from student_agent.submission import build_manifest, timestamped_submission_path
+from student_agent.submission import (
+    _validate_trace_integrity,
+    build_manifest,
+    timestamped_submission_path,
+)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -53,3 +57,27 @@ def test_default_submission_path_contains_utc_timestamp() -> None:
     assert timestamped_submission_path(Path("dist"), moment) == Path(
         "dist/submission-20260925T080706Z.zip"
     )
+
+
+def test_trace_integrity_rejects_output_from_another_run() -> None:
+    outputs = {
+        "CASE_001": {
+            "evidence_refs": ["ev_current"],
+            "claim_assessments": [{"claim_id": "claim-1", "evidence_refs": ["ev_current"]}],
+        },
+        "CASE_002": {
+            "evidence_refs": ["ev_stale"],
+            "claim_assessments": [],
+        },
+    }
+    events = [
+        {"case_id": "CASE_001", "event_type": "case_received"},
+        {
+            "case_id": "CASE_001",
+            "event_type": "tool_result_consumed",
+            "evidence_refs": ["ev_current"],
+        },
+        {"case_id": "CASE_001", "event_type": "case_finalized"},
+    ]
+    with pytest.raises(ValueError, match="CASE_002.*case_received"):
+        _validate_trace_integrity(outputs, events)

@@ -1,0 +1,159 @@
+================================================================================
+BÁO CÁO PHÂN TÍCH CHUYÊN SÂU CÁC KHẢ NĂNG EDGE CASES TRONG BÀI TOÁN K4-L3B
+DỰA TRÊN ĐẶC TÍNH OLIST BRAZILIAN E-COMMERCE DATASET & MCP MULTI-AGENT PIPELINE
+================================================================================
+Ngày lập: 2026-09-25
+Mục tiêu: Đào sâu failure modes, bóc tách cơ chế dữ liệu Olist Kaggle và định nghĩa
+các quy tắc (rules) xử lý để tối đa hóa điểm số Semantic & Evidence trong L3B.
+
+--------------------------------------------------------------------------------
+1. TỔNG QUAN VỀ BẢN CHẤT DỮ LIỆU OLIST (KAGGLE BRAZILIAN E-COMMERCE)
+--------------------------------------------------------------------------------
+Dataset Olist là dữ liệu e-commerce thực tế tại Brazil (2016 - 2018), nổi tiếng với
+các đặc trưng dị biệt rất dễ làm vỡ các hệ thống AI suy luận thông thường:
+
+1.1. Tách biệt giữa `customer_id` và `customer_unique_id`:
+  - Trong Olist, mỗi lần mua hàng, hệ thống sinh ra một `customer_id` mới (order-scoped).
+  - Nhưng cùng một người dùng thực tế được định danh bằng `customer_unique_id`.
+  - Hậu quả trong L3B: Input thường chỉ cho `customer_unique_id_hint`. Nếu Agent chỉ
+    tìm exact match theo order_id mà không tra cứu lịch sử qua `customer_unique_id`,
+    sẽ không thể biết khách hàng đã mua bao nhiêu lần, có đơn hàng nào trước đó.
+
+1.2. Trạng thái đơn hàng (Order Lifecycle) phức tạp:
+  - Vòng đời: `created` -> `approved` -> `invoiced` -> `shipped` -> `delivered`
+  - Các trạng thái bất thường: `unavailable` (hết hàng sau khi đã thanh toán),
+    `canceled` (hủy đơn bởi khách hoặc sàn sau khi đã thu tiền).
+
+1.3. Cấu trúc Split Payment & Multiple Items:
+  - Một đơn hàng có thể thanh toán bằng nhiều phương thức cùng lúc: Ví dụ trả góp
+    (credit_card installments) kết hợp voucher hoặc boleto (phiếu thu tiền mặt).
+  - Một đơn hàng có thể gồm nhiều mặt hàng từ nhiều người bán (`seller_id`) khác nhau,
+    dẫn đến các ngày hết hạn giao hàng (`shipping_limit_date`) hoàn toàn khác nhau.
+
+--------------------------------------------------------------------------------
+2. BÓC TÁCH CÁC NHÓM EDGE CASES TRỌNG ĐIỂM TỪ THỰC TẾ INPUT / OUTPUT
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+NHÓM 1: TEMPORAL IDENTITY & REPEAT PURCHASES (CÙNG ORDER ID Ở 2 MỐC THỜI GIAN)
+--------------------------------------------------------------------------------
+* Triệu chứng trong Input/Output:
+  - Xuất hiện ở các case như L3B_CASE_001, L3B_CASE_048...
+  - Tool `get_customer_history` trả về nhiều dòng có cùng một `order_id` hoặc khách hàng
+    có lịch sử mua hàng nhiều đợt.
+* Cơ chế lỗi:
+  - Nếu Agent lấy nhầm giao dịch sau ngày `opened_at` (ngày gửi khiếu nại), kết luận sẽ sai.
+  - Các sự kiện timeline (shipment, payment capture, refund) bị lẫn lộn giữa lần mua trước
+    và lần mua sau.
+* Quy tắc giải quyết (Resolution Rule):
+  - Lọc tất cả các dòng có `order_purchase_timestamp <= opened_at`.
+  - Chọn giao dịch có timestamp gần nhất với `opened_at` (max timestamp <= opened_at).
+  - Sử dụng mốc timestamp của lần mua kế tiếp (nếu có) làm cận trên (`next_purchase`)
+    để cắt sạch mọi log thanh toán/vận chuyển của tương lai.
+  - Luôn ghi nhận vào `data_conflicts` với `field="order_purchase_timestamp"`,
+    `selected_source="get_customer_history"`, `resolution_code="TEMPORAL_CASE_MATCH"`.
+
+--------------------------------------------------------------------------------
+NHÓM 2: CANCELED / UNAVAILABLE ORDERS BUT PAID (ĐƠN BỊ HỦY NHƯNG TIỀN VẪN BỊ TRỪ)
+--------------------------------------------------------------------------------
+* Triệu chứng trong Input/Output:
+  - Xuất hiện định kỳ ở các case đuôi 8 (L3B_CASE_008, 018, 028, ..., 098).
+  - Trạng thái đơn trong `get_customer_history` báo `canceled` hoặc `unavailable`.
+  - Nhưng trong `get_shipment_summary` không có dữ liệu giao hàng (`insufficient_evidence`).
+  - Trong khi đó `get_payment_timeline` lại có khoản tiền captured (ví dụ: 79.0 BRL).
+* Xung đột nguồn (Source Conflict):
+  - `get_shipment_summary` vs `get_customer_history`: Vận chuyển không ghi nhận đơn,
+    nhưng hệ thống đơn hàng báo đã hủy.
+* Cơ chế phán quyết chuẩn Olist Policy:
+  - `primary_issue`: `"canceled_order_paid"` (hoặc `"unavailable_order_paid"`).
+  - `responsible_parties`: Bên chịu trách nhiệm là `"platform"` (sàn thương mại điện tử),
+    vì sàn đã trừ tiền cổng thanh toán nhưng không tự động hoàn lại khi đơn bị hủy.
+  - `financial_resolution`: Phải hoàn trả 100% số tiền đã captured (`recommended_refund_brl = captured_total_brl`).
+  - `action`: `"issue_refund"`.
+  - Lưu ý MCP: Không cố gọi `get_refund_timeline` nếu biết đơn này chưa từng được kích hoạt
+    hoàn tiền, để tránh bị lãng phí call budget (tối ưu điểm efficiency).
+
+--------------------------------------------------------------------------------
+NHÓM 3: LOGISTICS DELAY VS SELLER DELAY (PHÂN ĐỊNH TRÁCH NHIỆM GIAO HÀNG CHẬM)
+--------------------------------------------------------------------------------
+* Triệu chứng trong Input/Output:
+  - Khách khiếu nại "Giao hàng quá hạn", yêu cầu bồi thường phí vận chuyển (freight)
+    hoặc hủy đơn hoàn tiền.
+* Cơ chế dữ liệu Olist:
+  - Có 3 mốc thời gian cốt lõi:
+    1. `shipping_limit_at`: Hạn chót người bán (`seller`) phải bàn giao hàng cho bưu cục.
+    2. `order_delivered_carrier_date`: Ngày hãng vận chuyển (`carrier/logistics`) nhận hàng.
+    3. `order_delivered_customer_date`: Ngày khách thực tế nhận hàng.
+    4. `order_estimated_delivery_date`: Ngày dự kiến giao ban đầu hiển thị cho khách.
+* Quy tắc phân xử trách nhiệm (Fault Attribution):
+  - TRƯỜNG HỢP A - Lỗi do Người Bán (`seller_delay`):
+    * Điều kiện: `carrier_date > shipping_limit_at`.
+    * Người bán chậm giao cho bưu cục.
+    * `primary_issue`: `"late_delivery_seller"`.
+    * `responsible_parties`: `"seller"` (kèm seller_id vi phạm trong `late_seller_ids`).
+  - TRƯỜNG HỢP B - Lỗi do Đơn Vị Vận Chuyển (`logistics_delay`):
+    * Điều kiện: `carrier_date <= shipping_limit_at` NHƯNG `delivered_date > estimated_date`.
+    * Người bán giao đúng hẹn, nhưng hãng vận chuyển ôm hàng làm trễ hẹn cam kết với khách.
+    * `primary_issue`: `"late_delivery_logistics"`.
+    * `responsible_parties`: `"logistics_provider"`.
+    * `financial_resolution`: Bồi hoàn phí vận chuyển (`refund_freight`) tương ứng số tiền cước.
+
+--------------------------------------------------------------------------------
+NHÓM 4: SPLIT PAYMENT & RECONCILIATION MISMATCH (BẤT THƯỜNG THANH TOÁN)
+--------------------------------------------------------------------------------
+* Triệu chứng trong Input/Output:
+  - Khách thanh toán nhiều lần hoặc bằng nhiều phương thức (Credit Card + Boleto).
+  - Có các case như L3B_CASE_002, L3B_CASE_012...
+* Các failure modes cần phân biệt rõ:
+  1. `duplicate_capture`:
+     * Số tiền `captured_total_brl > expected_total + 0.01` và có nhiều hơn 1 lệnh capture.
+     * Khách bị quẹt thẻ 2 lần cho cùng một món đồ.
+     * Action: Hoàn phần tiền chênh lệch thừa (`refund_excess_charge`).
+  2. `capture_mismatch`:
+     * Sự kiện `reconciliation_mismatch` xuất hiện trong log của cổng thanh toán.
+     * Số tiền ghi nợ không khớp với giá trị giỏ hàng.
+  3. `refund_failed` vs `refund_pending`:
+     * Cổng thanh toán có event `refund` nhưng trạng thái là `failed` (thẻ hết hạn, lỗi ngân hàng).
+     * Phải phân định lỗi do `"payment_provider"` và kích hoạt quy trình hoàn tiền thủ công.
+  4. `valid_split_payment`:
+     * Khách trả nhiều lượt nhưng tổng tiền các lượt khớp chính xác với `price + freight`.
+     * Đây là đơn bình thường (`no_action`), khiếu nại của khách là vô căn cứ (`unsupported_claim`).
+
+--------------------------------------------------------------------------------
+NHÓM 5: UNSUPPORTED CLAIMS & ANTI-HALLUCINATION (TỪ CHỐI KHIẾU NẠI KHỐNG)
+--------------------------------------------------------------------------------
+* Triệu chứng trong Input:
+  - Khách gửi khiếu nại đòi hoàn tiền với lý do giao trễ hoặc hàng hỏng, nhưng trong dữ liệu:
+    * Đơn giao sớm hơn hoặc đúng ngày `estimated_delivery_date`.
+    * Tiền thanh toán đầy đủ, không có lệnh trừ tiền thừa.
+* Nguy cơ của Agent nếu không kiểm soát chặt:
+  - Agent dễ bị "ảo giác đồng cảm" theo text prompt của khách và đồng ý hoàn tiền bừa bãi.
+  - Hậu quả: Vi phạm Invariants (Giao đúng hạn mà primary_issue = late_delivery) -> Bị phạt
+    nặng điểm `consistency` (10%) và `semantic` (40%).
+* Quy tắc xử lý:
+  - Nếu tất cả các kiểm tra shipment và payment đều `on_time` và `reconciled`:
+    * `primary_issue`: `"unsupported_claim"`.
+    * `case_status`: `"no_action"`.
+    * `claim_assessments.verdict`: `"unsupported"`.
+    * `recommended_refund_brl`: `0.0`.
+    * `confidence`: Giữ ở mức vừa phải `0.65 - 0.70` (tránh overconfidence 1.0 vì khiếu nại
+      bị bác bỏ luôn có rủi ro tranh chấp tiếp).
+
+--------------------------------------------------------------------------------
+3. CHIẾN LƯỢC TỐI ƯU HÓA ĐỂ ĐẠT ĐIỂM TUYỆT ĐỐI (REVERSE ENGINEERING PLAYBOOK)
+--------------------------------------------------------------------------------
+1. Giữ nguyên cấu trúc Deterministic Pipeline hiện tại:
+   - Toàn bộ 5 nhóm edge cases trên hoàn toàn giải quyết được bằng logic toán học & thời gian,
+     không phụ thuộc vào LLM xác suất.
+2. Tinh chỉnh các trường hợp `data_conflicts`:
+   - Luôn chủ động bắt cặp nguồn xung đột:
+     + `order_purchase_timestamp`: [get_order, get_customer_history] -> chọn customer_history.
+     + `order_status`: [get_shipment_summary, get_customer_history] -> chọn customer_history.
+3. Không lãng phí Tool Call Budget:
+   - Các case canceled/unavailable: Bỏ gọi `get_refund_timeline` nếu không có tín hiệu refund.
+   - Luôn dùng candidate list sạch, không gọi tool với `candidate-*` giả mạo.
+4. Đảm bảo 100% Invariants của Verifier:
+   - Không bao giờ để `recommended_refund_brl > captured_total_brl`.
+   - Nếu `case_status == "no_action"` thì `recommended_refund_brl` bắt buộc bằng `0.0`.
+   - Mọi `evidence_ref` gắn trong output bắt buộc phải có mặt trong trace `tool_result_consumed`.
+================================================================================

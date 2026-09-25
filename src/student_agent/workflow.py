@@ -9,10 +9,12 @@ from decimal import Decimal, InvalidOperation
 from itertools import combinations
 from typing import Any
 
+from .llama_adapter import LlamaClient
 from .mcp_gateway import EvidenceGateway
 from .trace import TraceWriter
 
 LOG = logging.getLogger(__name__)
+LLAMA = LlamaClient()
 ORDER_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -365,7 +367,23 @@ async def solve_case(
     elif selected and payment and shipment:
         primary = "unsupported_claim"
     else:
-        primary = "insufficient_evidence"
+        # Sử dụng Meta-Llama-3.1-8B-Instruct semantic analyzer nếu rơi vào vùng mơ hồ
+        ai_resolved = False
+        if LLAMA.is_available() and request.get("message"):
+            prompt = (
+                f"Customer claim message: '{request.get('message')}'. "
+                f"Claims: {request.get('claims')}. "
+                "Map to exactly one allowed issue: late_delivery_logistics, late_delivery_seller, "
+                "valid_split_payment, payment_mismatch, duplicate_charge, refund_pending, "
+                "refund_failed, canceled_order_paid, unavailable_order_paid, unsupported_claim. "
+                "Return JSON with key 'predicted_issue'."
+            )
+            ai_res = LLAMA.analyze_semantic(prompt)
+            if ai_res and supported.get(ai_res.get("predicted_issue", ""), False):
+                primary = ai_res["predicted_issue"]
+                ai_resolved = True
+        if not ai_resolved:
+            primary = "insufficient_evidence"
 
     rules = ((policy or {}).get("data") or {}).get("rules") or {}
     rule = rules.get(primary) if isinstance(rules, dict) else None
@@ -390,11 +408,14 @@ async def solve_case(
     claim_tools = {
         "late_delivery_logistics": (
             "get_customer_history",
+            "get_order",
+            "get_order_items",
             "get_shipment_summary",
             "get_policy",
         ),
         "late_delivery_seller": (
             "get_customer_history",
+            "get_order",
             "get_order_items",
             "get_shipment_summary",
             "get_sellers",
@@ -402,48 +423,60 @@ async def solve_case(
         ),
         "valid_split_payment": (
             "get_customer_history",
+            "get_order",
             "get_order_items",
             "get_payment_timeline",
             "get_policy",
         ),
         "payment_mismatch": (
             "get_customer_history",
+            "get_order",
             "get_order_items",
             "get_payment_timeline",
             "get_policy",
         ),
         "duplicate_charge": (
             "get_customer_history",
+            "get_order",
             "get_order_items",
             "get_payment_timeline",
             "get_policy",
         ),
         "refund_pending": (
             "get_customer_history",
+            "get_order",
+            "get_order_items",
             "get_payment_timeline",
             "get_refund_timeline",
             "get_policy",
         ),
         "refund_failed": (
             "get_customer_history",
+            "get_order",
+            "get_order_items",
             "get_payment_timeline",
             "get_refund_timeline",
             "get_policy",
         ),
         "canceled_order_paid": (
             "get_customer_history",
+            "get_order",
             "get_order_items",
             "get_payment_timeline",
+            "get_shipment_summary",
             "get_policy",
         ),
         "unavailable_order_paid": (
             "get_customer_history",
+            "get_order",
             "get_order_items",
             "get_payment_timeline",
+            "get_shipment_summary",
             "get_policy",
         ),
         "unsupported_claim": (
             "get_customer_history",
+            "get_order",
             "get_order_items",
             "get_shipment_summary",
             "get_payment_timeline",
@@ -532,8 +565,10 @@ async def solve_case(
         evidence_topic = primary if topic == "requested_full_refund" else topic
         names = claim_tools.get(evidence_topic, tuple(evidence))
         if topic == "requested_full_refund":
-            names = tuple(dict.fromkeys((*names, "get_payment_timeline", "get_refund_timeline")))
+            names = tuple(dict.fromkeys((*names, "get_customer_history", "get_payment_timeline", "get_refund_timeline", "get_order_items")))
         claim_refs = scoped_refs(*names)
+        if not claim_refs:
+            claim_refs = refs[:10]
         claim_assessments.append(
             {
                 "claim_id": claim["claim_id"],

@@ -116,9 +116,7 @@ def main() -> None:
             print(f"OK: {len(case_set.case_ids)} outputs / {len(trace)} trace events")
         elif args.command == "package":
             destination = (
-                root / args.output
-                if args.output
-                else timestamped_submission_path(root / "dist")
+                root / args.output if args.output else timestamped_submission_path(root / "dist")
             )
             destination = package_submission(root, destination)
             print(f"OK: {destination}")

@@ -1,0 +1,1585 @@
+NGHIÊN CỨU BÀI TOÁN
+MULTI-AGENT ORCHESTRATION & INVESTIGATION PIPELINE
+Giới hạn mô hình: <= 10B tham số
+Ngày nghiên cứu: 2026-09-25
+
+======================================================================
+0. EXECUTIVE SUMMARY
+======================================================================
+
+Bài toán trong ảnh không nên được giải theo kiểu "cho 5 agent nói chuyện tự do với nhau".
+Với giới hạn model <=10B, cách có xác suất thành công cao hơn là:
+
+  Deterministic workflow / state machine
+        +
+  một model nhỏ dùng lại cho nhiều role
+        +
+  evidence store bất biến
+        +
+  entity-resolution hybrid
+        +
+  schema validation + constrained output
+        +
+  rule engine cho các quyết định có thể xác định bằng logic
+        +
+  LLM chỉ xử lý phần semantic/ambiguous.
+
+Kiến trúc nên là hierarchical supervisor nhưng supervisor KHÔNG nhất thiết phải là LLM.
+Supervisor nên ưu tiên code/rules để:
+- phân rã task theo template,
+- giới hạn tool budget,
+- theo dõi state,
+- dừng pipeline,
+- retry khi schema lỗi,
+- kiểm tra evidence coverage.
+
+LLM <=10B nên được dùng cho:
+1) semantic extraction,
+2) entity-match tie breaker,
+3) conflict interpretation,
+4) synthesis/final explanation,
+5) tool selection khi route không thể xác định bằng rule.
+
+Đề xuất model:
+- Default: Qwen3-8B (open-weight, tool calling, multi-step tool use).
+- Alternative rất đáng thử: Ministral 3 8B (structured output + function calling chính thức).
+- Nhẹ hơn: Gemma 3 4B / Qwen2.5-7B nếu hạ tầng hoặc VRAM hạn chế.
+
+Đề xuất stack:
+- Python + Pydantic
+- LangGraph hoặc workflow engine tự viết
+- FastMCP / MCP SDK
+- DuckDB/PostgreSQL
+- Splink hoặc pyJedAI cho entity resolution
+- sentence-transformers / embedding nhỏ cho blocking
+- vLLM hoặc SGLang cho inference
+- JSON Schema + retry tối đa 1-2 lần
+- pytest + benchmark harness riêng.
+
+Kết luận quan trọng:
+"Multi-agent" ở đây nên hiểu là tách vai trò và contract, KHÔNG phải bắt buộc dùng nhiều model.
+Một model Qwen3-8B có thể đóng Supervisor, Extractor, Resolver, Verifier, Narrator với system prompt
+khác nhau; nhưng càng nhiều bước có thể thay bằng deterministic code càng tốt.
+
+======================================================================
+1. BẢN CHẤT BÀI TOÁN
+======================================================================
+
+Loại bài toán:
+Multi-Agent Orchestration & Investigation Pipeline với evidence-based reasoning.
+
+Các năng lực cốt lõi:
+
+A. Orchestration
+- phân rã câu hỏi thành các bước điều tra,
+- chọn worker,
+- quản lý dependency giữa các subtask,
+- quản lý tool budget,
+- termination condition,
+- retry/fallback.
+
+B. Entity Resolution
+- từ dữ liệu không hoàn hảo, xác định các record có cùng thực thể hay không.
+Ví dụ:
+  "Nguyen Van A", "N. V. A.", customer_id X, phone bị che, địa chỉ gần giống
+  -> có phải cùng khách hàng không?
+
+C. Evidence/Provenance
+Mọi conclusion phải truy ngược được:
+  claim -> evidence_id -> tool call -> raw source.
+
+D. Conflict Resolution
+Ví dụ:
+  customer: "chưa nhận hàng"
+  logistics event: "delivered"
+  proof of delivery: thiếu
+  seller: "đã giao cho carrier"
+Hệ thống không được đơn giản chọn một nguồn rồi kết luận.
+Nó phải biểu diễn:
+  - các claim cạnh tranh,
+  - evidence ủng hộ/phản bác,
+  - độ tin cậy,
+  - freshness,
+  - unresolved uncertainty.
+
+E. Constraint Satisfaction
+Output phải thỏa:
+- JSON Schema,
+- logic consistency,
+- tool budget,
+- evidence coverage,
+- không hallucinate evidence,
+- không reference evidence_id không tồn tại.
+
+======================================================================
+2. "KẾT QUẢ TỐT" NÊN ĐƯỢC ĐO NHƯ THẾ NÀO?
+======================================================================
+
+Không nên chỉ chấm final answer bằng BLEU/ROUGE hoặc cảm tính.
+
+Nên tách metric:
+
+2.1 Entity Resolution
+- Precision
+- Recall
+- F1
+- False Merge Rate (rất quan trọng)
+- False Split Rate
+- Candidate Recall sau blocking
+
+False merge thường nguy hiểm hơn false split trong investigation:
+ghép nhầm hai người/thực thể có thể làm hỏng toàn bộ reasoning downstream.
+
+2.2 Evidence Grounding
+- Evidence Precision:
+  % evidence được cite thực sự hỗ trợ claim.
+- Evidence Recall:
+  % claim quan trọng có evidence.
+- Citation Validity:
+  evidence_id có tồn tại hay không.
+- Unsupported Claim Rate:
+  % claim không có provenance.
+
+Mục tiêu MVP tốt:
+- Citation validity = 100%
+- Unsupported high-severity claim = 0%
+
+2.3 Conflict Resolution
+- Conflict detection recall
+- Correctly unresolved rate:
+  hệ thống phải biết khi nào chưa đủ bằng chứng.
+- Contradiction leakage:
+  final answer không được chứa đồng thời hai kết luận không thể cùng đúng mà không giải thích.
+
+2.4 Tool Use
+- Tool selection accuracy
+- Invalid tool-call rate
+- redundant calls / case
+- total tool calls / case
+- tool failure recovery rate
+
+2.5 Structured Output
+- JSON parse success
+- schema validation success
+- semantic consistency validation success
+- retry count
+
+Mục tiêu:
+- JSON parse >= 99%
+- schema valid >= 99%
+sau repair/retry layer.
+
+2.6 End-to-end
+- Case accuracy
+- Evidence-grounded answer accuracy
+- Average latency
+- tokens/case
+- tool calls/case
+- % cases requiring human review.
+
+======================================================================
+3. KIẾN TRÚC ĐỀ XUẤT CHO MODEL <=10B
+======================================================================
+
+Không nên:
+User -> Supervisor LLM -> Agent A -> Agent B -> Agent C -> tự chat vòng lặp vô hạn.
+
+Nên:
+
+User Query
+   |
+   v
+[1] Intake + deterministic parser
+   |
+   v
+[2] Planner / Supervisor
+   |
+   +-------------------------------+
+   |                               |
+   v                               v
+[3] Evidence Collector        [4] Entity Resolver
+   |                               |
+   +---------------+---------------+
+                   |
+                   v
+            [5] Claim Ledger
+                   |
+                   v
+            [6] Conflict Resolver
+                   |
+                   v
+            [7] Verifier / Gate
+                   |
+             pass? / fail?
+              |       |
+              |       +--> targeted retrieval / human review
+              v
+            [8] Narrator
+                   |
+                   v
+              Final JSON
+
+Các state phải lưu ngoài LLM:
+- task_id
+- entities
+- candidate pairs
+- evidence
+- claims
+- conflicts
+- tool_call_count
+- remaining_budget
+- validation_errors
+- final_decision.
+
+Lợi ích:
+- model nhỏ không cần nhớ toàn bộ context,
+- không phụ thuộc vào hidden reasoning,
+- dễ debug,
+- deterministic replay,
+- dễ benchmark.
+
+======================================================================
+4. MODEL <=10B NÊN DÙNG GÌ?
+======================================================================
+
+4.1 Qwen3-8B -- đề xuất mặc định
+
+Điểm mạnh:
+- open-weight,
+- hỗ trợ function/tool calling,
+- multi-turn / multi-step tool calling,
+- Qwen-Agent có MCP integration,
+- ecosystem vLLM/SGLang tốt,
+- có thinking/non-thinking modes,
+- multilingual tốt, phù hợp dữ liệu tiếng Việt/Anh.
+
+Điểm cần lưu ý:
+- đừng để model tự do ReAct quá dài;
+- tool-call parser và chat template phải đúng;
+- cần JSON validation sau generation;
+- temperature thấp (0-0.2) cho routing/extraction.
+
+Vai trò tốt:
+- semantic extraction
+- tool selection
+- conflict explanation
+- final synthesis
+- ambiguous entity comparison.
+
+4.2 Ministral 3 8B
+
+Điểm mạnh:
+- model 8B cho edge/local,
+- function calling chính thức,
+- structured output chính thức,
+- context lớn,
+- phù hợp pipeline cần schema nghiêm.
+
+Nếu bài thi/bài project chú trọng JSON + function calling reliability,
+Ministral 3 8B là candidate rất mạnh để benchmark trực tiếp với Qwen3-8B.
+
+4.3 Gemma 3 4B
+
+Điểm mạnh:
+- nhỏ hơn, dễ deploy,
+- 128K context cho bản 4B,
+- phù hợp extractor / classifier / summarizer.
+
+Nhược:
+- với orchestration nhiều tool và ambiguity phức tạp,
+  nên benchmark thực tế trước khi chọn làm model duy nhất.
+
+4.4 Qwen2.5-7B-Instruct
+
+Điểm mạnh:
+- ổn định, ecosystem rộng,
+- chat template có tool calling,
+- rất nhiều quantization.
+
+Nhược:
+- thế hệ cũ hơn Qwen3; nếu không có constraint hạ tầng đặc biệt thì nên lấy Qwen3-8B làm baseline mới.
+
+4.5 Không nên chọn chỉ dựa trên benchmark tổng quát
+
+Bài toán này phụ thuộc nhiều vào:
+- BFCL-style function calling,
+- JSON correctness,
+- retrieval grounding,
+- entity matching,
+- long-context discipline.
+
+Do đó phải benchmark trên CASE CỦA BẠN.
+
+Recommended experiment:
+A) Qwen3-8B
+B) Ministral 3 8B
+C) Gemma 3 4B
+
+Chạy cùng 100-300 case test, cùng schema, cùng tool set.
+So sánh:
+- end-to-end accuracy,
+- invalid tool call,
+- JSON failure,
+- unsupported claims,
+- latency.
+
+======================================================================
+5. NGUYÊN TẮC VÀNG: DÙNG LLM ÍT NHẤT CÓ THỂ
+======================================================================
+
+Một pipeline tốt với <=10B thường thắng bằng hệ thống chứ không phải prompt.
+
+Ví dụ:
+
+KHÔNG:
+"Agent, hãy xem 10,000 customer records và tìm người giống nhất."
+
+NÊN:
+1. normalize tên/email/phone/address bằng code,
+2. deterministic match các exact identifiers,
+3. blocking lấy top 20-50 candidates,
+4. fuzzy/embedding/probabilistic score,
+5. chỉ gửi top 3-5 ambiguous candidates vào LLM.
+
+LLM chỉ giải quyết entropy còn lại.
+
+Cùng nguyên tắc cho conflict:
+- timestamps => code,
+- source type => rules,
+- numeric comparison => code,
+- logical contradictions => validator,
+- semantic contradiction => LLM.
+
+======================================================================
+6. ENTITY RESOLUTION: PIPELINE CÓ XÁC SUẤT THẮNG CAO
+======================================================================
+
+Entity Resolution truyền thống thường có 2 stage:
+1) blocking
+2) matching
+
+Đây vẫn là thiết kế đúng cho LLM system.
+
+6.1 Normalize
+
+Ví dụ:
+- lowercase,
+- unicode normalize,
+- bỏ punctuation,
+- chuẩn hóa phone,
+- chuẩn hóa email,
+- chuẩn hóa địa chỉ,
+- tokenize tên,
+- canonicalize abbreviations.
+
+6.2 Exact / deterministic keys
+
+Ưu tiên:
+- unique customer ID
+- verified email
+- verified phone
+- transaction ID
+- order ID
+- tracking ID.
+
+Nếu exact verified ID match -> không cần LLM.
+
+6.3 Blocking
+
+Tạo candidate list nhỏ bằng:
+- cùng ZIP / state,
+- phonetic/fuzzy name,
+- email domain + partial local part,
+- phone suffix,
+- embedding nearest neighbors,
+- BM25,
+- learned blocking.
+
+Splink nhấn mạnh blocking là yếu tố quyết định performance của linkage pipeline.
+
+6.4 Probabilistic scoring
+
+Dùng Splink/Fellegi-Sunter hoặc lightweight classifier.
+
+Features:
+- name_similarity
+- address_similarity
+- phone_match
+- email_match
+- geo_distance
+- temporal compatibility
+- account overlap
+- order overlap.
+
+Ví dụ:
+score >= 0.98 -> MATCH
+score <= 0.10 -> NO_MATCH
+0.10 < score < 0.98 -> ambiguous -> LLM judge
+
+Threshold phải tune trên validation set, không lấy tùy ý.
+
+6.5 LLM tie-breaker
+
+Chỉ đưa:
+- entity A
+- top candidate B1/B2/B3
+- normalized fields
+- deterministic feature scores
+- explicit conflict fields.
+
+Prompt yêu cầu output:
+{
+  "decision": "MATCH|NO_MATCH|UNCERTAIN",
+  "candidate_id": "...",
+  "supporting_fields": [...],
+  "conflicting_fields": [...],
+  "confidence": 0.0-1.0
+}
+
+Quan trọng:
+LLM confidence KHÔNG được coi là calibrated probability.
+Dùng nó làm tín hiệu phụ, không phải truth.
+
+6.6 Benchmark entity resolution
+
+Dataset/repo đáng dùng:
+- ER-Magellan / DeepMatcher datasets
+- Ditto
+- Machamp
+- WDC Product Matching
+- Splink synthetic datasets
+- pyJedAI demos
+
+Ditto cho thấy cách serialize pair record thành sequence-pair classification.
+Machamp có benchmark structured, semi-structured, heterogeneous schema.
+Đây là nguồn thực nghiệm tốt hơn việc chỉ prompt LLM.
+
+======================================================================
+7. EVIDENCE MODEL / PROVENANCE
+======================================================================
+
+Không cho agent viết conclusion trực tiếp từ raw tool output rồi mất dấu nguồn.
+
+Mỗi tool result phải được materialize thành EvidenceRecord:
+
+EvidenceRecord:
+{
+  "evidence_id": "ev_001",
+  "source": "logistics_api",
+  "source_type": "system_record",
+  "retrieved_at": "...",
+  "event_time": "...",
+  "entity_ids": ["order_123", "customer_7"],
+  "content": {...},
+  "content_hash": "...",
+  "tool_call_id": "tc_009"
+}
+
+Claim:
+{
+  "claim_id": "cl_014",
+  "subject": "order_123",
+  "predicate": "delivery_status",
+  "value": "delivered",
+  "evidence_for": ["ev_001", "ev_007"],
+  "evidence_against": ["ev_010"],
+  "status": "CONTESTED"
+}
+
+Final answer không được reference raw source tự do.
+Chỉ được reference evidence_id tồn tại trong store.
+
+Verifier:
+for every final_claim:
+    assert len(evidence_for) > 0
+    assert all(eid in evidence_store)
+    assert no forbidden contradiction
+
+Đây là cách ngăn "bịa evidence" hiệu quả hơn prompt.
+
+======================================================================
+8. CONFLICT RESOLUTION
+======================================================================
+
+Không nên có rule đơn giản:
+"system log luôn đáng tin hơn customer".
+
+Nên tách 4 khái niệm:
+
+1. Source reliability
+2. Evidence directness
+3. Temporal freshness
+4. Claim compatibility
+
+Ví dụ:
+
+Customer says "I did not receive package"
+-> direct evidence về customer experience,
+   nhưng không xác minh được physical delivery.
+
+Carrier status "delivered"
+-> system event,
+   nhưng có thể scan nhầm hoặc giao sai người.
+
+Proof-of-delivery signature/photo
+-> direct physical evidence mạnh hơn.
+
+Nên tạo conflict object:
+
+{
+  "conflict_id": "...",
+  "claim_a": "...",
+  "claim_b": "...",
+  "type": "STATUS_CONTRADICTION",
+  "resolution": "UNRESOLVED|A_WINS|B_WINS|MERGED",
+  "required_next_evidence": [...]
+}
+
+Resolution policy:
+
+A. Nếu conflict có thể giải bằng timestamp:
+   dùng deterministic temporal logic.
+
+B. Nếu nguồn khác nhau nói về khác giai đoạn:
+   cả hai có thể đúng.
+Ví dụ:
+   status at 10:00 = in_transit
+   status at 15:00 = delivered.
+
+C. Nếu cùng thời điểm và mutually exclusive:
+   tìm stronger direct evidence.
+
+D. Nếu vẫn không đủ:
+   output UNRESOLVED và đề nghị next tool/evidence.
+
+"Biết chưa đủ bằng chứng" là behavior đúng, không phải failure.
+
+======================================================================
+9. SUPERVISOR: LLM HAY CODE?
+======================================================================
+
+Với <=10B:
+Supervisor nên HYBRID.
+
+Rule-based supervisor xử lý:
+- state transitions,
+- budget,
+- retry,
+- termination,
+- mandatory steps,
+- validation.
+
+LLM supervisor chỉ xử lý:
+- query classification,
+- task decomposition khi query mới lạ,
+- chọn một trong số route hợp lệ.
+
+Ví dụ state machine:
+
+INIT
+ -> IDENTIFY_ENTITIES
+ -> COLLECT_EVIDENCE
+ -> RESOLVE_ENTITIES
+ -> BUILD_CLAIMS
+ -> CHECK_CONFLICTS
+ -> VERIFY
+ -> FINALIZE
+
+Nếu VERIFY trả:
+MISSING_EVIDENCE
+ -> COLLECT_EVIDENCE(targeted)
+
+Nếu TOOL_BUDGET_EXCEEDED
+ -> HUMAN_REVIEW / PARTIAL_RESULT
+
+Điều này tốt hơn "agent tự quyết định cứ làm tiếp hay dừng".
+
+======================================================================
+10. AGENT ROLES TỐI GIẢN
+======================================================================
+
+Không cần 10-20 agent.
+
+MVP nên có 5 logical roles:
+
+1. Coordinator
+- lập kế hoạch,
+- route worker,
+- giữ budget.
+
+2. Evidence Collector
+- gọi MCP tools,
+- normalize tool result,
+- tạo EvidenceRecord.
+
+3. Entity Resolver
+- blocking + scorer + LLM tie-breaker.
+
+4. Investigator / Conflict Resolver
+- xây claim graph,
+- tìm contradiction,
+- yêu cầu targeted evidence.
+
+5. Verifier + Narrator
+- verifier nên phần lớn deterministic.
+- narrator chỉ viết từ verified state.
+
+Có thể tách Narrator thành agent 6 nếu cần.
+
+Một physical model Qwen3-8B có thể phục vụ tất cả các logical roles.
+
+======================================================================
+11. MESSAGE CONTRACT GIỮA AGENT
+======================================================================
+
+Không gửi prose tự do kiểu:
+"tôi nghĩ agent B nên xem thêm..."
+
+Dùng typed message.
+
+AgentMessage:
+{
+  "message_id": "msg_123",
+  "task_id": "case_001",
+  "sender": "entity_resolver",
+  "receiver": "coordinator",
+  "message_type": "ENTITY_RESOLUTION_RESULT",
+  "payload": {...},
+  "evidence_ids": ["ev_1", "ev_5"],
+  "confidence": 0.82,
+  "requires_action": false
+}
+
+Các message_type hữu ích:
+- TASK_ASSIGNMENT
+- TOOL_REQUEST
+- TOOL_RESULT
+- ENTITY_CANDIDATES
+- ENTITY_RESOLUTION_RESULT
+- CLAIM_ADDED
+- CONFLICT_DETECTED
+- EVIDENCE_GAP
+- VALIDATION_FAILED
+- FINAL_RESULT
+
+Lợi ích:
+- dễ log,
+- dễ replay,
+- dễ unit test,
+- giảm ambiguity cho small model.
+
+======================================================================
+12. MCP TOOLING
+======================================================================
+
+MCP giúp standardize tool/resource access nhưng MCP không tự giải quyết:
+- grounding,
+- authorization,
+- tool safety,
+- evidence provenance,
+- retry semantics.
+
+Mỗi MCP tool wrapper nên trả kết quả dạng:
+
+{
+  "tool_call_id": "...",
+  "tool_name": "...",
+  "status": "OK|ERROR|PARTIAL",
+  "records": [...],
+  "source_metadata": {...}
+}
+
+Không feed raw HTML/log 100KB trực tiếp cho LLM.
+Nên có adapter:
+raw tool output -> normalize -> filter -> evidence records -> LLM.
+
+Tool budget nên cứng:
+- max_total_calls
+- max_calls_per_tool
+- max_retries
+- max_parallel_calls
+- max_payload_tokens.
+
+Ví dụ MVP:
+- max 8 tool calls/case
+- max 1 retry/tool
+- max 3 candidates/entity
+- max 2 replans.
+
+======================================================================
+13. JSON SCHEMA / CONSTRAINED OUTPUT
+======================================================================
+
+Small model thường fail pipeline không phải vì reasoning kém mà vì:
+- thừa text,
+- sai field,
+- enum sai,
+- malformed JSON,
+- thiếu required property.
+
+Do đó:
+1. dùng JSON Schema/Pydantic model,
+2. constrained decoding nếu server hỗ trợ,
+3. validate,
+4. repair deterministically nếu trivial,
+5. retry model một lần với validation error,
+6. fail closed nếu vẫn sai.
+
+Không nên retry vô hạn.
+
+Ví dụ:
+
+class Resolution(BaseModel):
+    decision: Literal["MATCH","NO_MATCH","UNCERTAIN"]
+    candidate_id: str | None
+    supporting_evidence_ids: list[str]
+    conflicting_evidence_ids: list[str]
+
+Sau parse:
+- evidence_id có tồn tại?
+- candidate_id có trong candidate list?
+- MATCH mà candidate_id null -> invalid.
+- UNCERTAIN nhưng confidence=1.0 -> semantic warning.
+
+Structured output từ Mistral hỗ trợ custom schema;
+Qwen3 tool-call output cũng có structured tool format nhưng vẫn nên validate ở app layer.
+
+======================================================================
+14. PROMPTING CHO SMALL MODEL
+======================================================================
+
+Prompt càng "văn chương" càng không tốt.
+
+Nên:
+- role ngắn,
+- input format cố định,
+- output schema cụ thể,
+- 2-4 examples khó,
+- nói rõ forbidden behavior,
+- không yêu cầu chain-of-thought.
+
+Ví dụ Entity Resolver system prompt:
+
+"You are an entity-resolution judge.
+You receive ONE source entity and up to THREE candidates.
+Use only supplied fields and scores.
+Never invent identifiers.
+Return MATCH only when evidence is sufficient.
+If evidence is conflicting or insufficient, return UNCERTAIN.
+Output only schema X."
+
+Đưa cả 50 policy rule vào một prompt thường làm model 7-8B giảm reliability.
+Policy nên đặt trong code validator.
+
+======================================================================
+15. CLAIM GRAPH THAY VÌ CHAT HISTORY
+======================================================================
+
+Không dùng conversation history làm database.
+
+Dùng graph / relational state:
+
+Entity nodes
+Claim nodes
+Evidence nodes
+
+Edges:
+- evidence SUPPORTS claim
+- evidence CONTRADICTS claim
+- claim ABOUT entity
+- entity SAME_AS entity
+- entity POSSIBLY_SAME_AS entity
+
+Narrator chỉ nhận:
+- verified claims,
+- unresolved conflicts,
+- minimal evidence snippets.
+
+Không nhận toàn bộ raw logs.
+
+Đây là pattern tương tự một Kaggle Agentic Investigation Board:
+Researcher -> Extractor -> Merger -> Narrator,
+trong đó vector search thu hẹp candidate trước khi LLM quyết định merge.
+Ý tưởng này rất hợp với constraint <=10B.
+
+======================================================================
+16. KAGGLE: CÓ AI LÀM GẦN BÀI NÀY CHƯA?
+======================================================================
+
+Có các Kaggle capstone/writeup rất gần về kiến trúc, nhưng không nên mặc định tác giả là "Kaggle Master"
+nếu profile/rank không được xác minh.
+
+A. Agentic Investigation Board (Kaggle, 2026)
+Rất gần bài toán:
+- Orchestrator
+- Researcher
+- Extractor
+- Merger
+- Narrator
+- MCP
+- entity extraction
+- candidate narrowing bằng vector index
+- evidence board
+- cited narrative
+- giới hạn replan
+
+Ý tưởng đáng lấy:
+1) candidate generation bằng math/vector trước LLM;
+2) LLM chỉ xét vài candidate;
+3) narrator chỉ đọc structured graph cuối;
+4) không để context tăng theo toàn bộ evidence;
+5) replan target cụ thể thay vì restart toàn bộ.
+
+B. IncidentZero-AI (Kaggle, 2026)
+Điểm cực đáng lấy:
+- tách deterministic detection và LLM reasoning.
+- rule engine tìm evidence thật;
+- LLM đứng trên evidence đã verify;
+- tránh việc LLM "phát hiện" dữ liệu không tồn tại.
+
+Đây chính xác là pattern nên dùng:
+verified evidence first, generation second.
+
+C. Veritas AI / Smart Personal Research Assistant
+Cho thấy:
+- multi-agent sequential pipeline,
+- tool use,
+- citations,
+- evaluation / judge,
+- memory.
+
+Nhưng cần cẩn thận với LLM-as-a-Judge:
+judge không nên là ground truth duy nhất.
+Đối với entity resolution và tool correctness, có thể dùng exact labels/unit tests.
+
+Tóm lại:
+Có prior art trên Kaggle đáng tham khảo, nhưng giá trị nằm ở architecture và writeup,
+không nằm ở danh hiệu của tác giả.
+
+======================================================================
+17. BENCHMARK / REPO NÊN TẢI VỀ NGHIÊN CỨU
+======================================================================
+
+1) Berkeley Function Calling Leaderboard (BFCL)
+Dùng để hiểu:
+- tool selection
+- multi-turn
+- multi-step
+- relevance detection
+- format sensitivity
+- error recovery.
+
+Nên dùng BFCL-style test riêng cho MCP tools của bạn.
+
+2) Ditto
+Entity matching bằng pretrained LM.
+Rất hữu ích để benchmark matching stage độc lập với agent system.
+
+3) Machamp
+Generalized Entity Matching benchmark:
+- structured
+- heterogeneous schema
+- semi-structured
+- text.
+
+4) Splink
+Probabilistic record linkage.
+Rất phù hợp làm candidate scorer trước LLM.
+
+5) pyJedAI
+End-to-end Entity Resolution:
+- blocking
+- matching
+- supervised / unsupervised.
+
+6) LangGraph supervisor
+Tham khảo hierarchical supervisor, state graph, handoff, memory.
+Nhưng đừng dùng framework như "magic".
+State machine của bài này đủ đơn giản để tự code cũng được.
+
+7) Microsoft AutoGen
+SelectorGroupChat cho thấy pattern planner/search/analyst và termination conditions.
+Docs cũng cảnh báo với small model như Phi-4 nên giữ selector prompt đơn giản.
+Đây là lesson rất quan trọng cho model <=10B.
+
+======================================================================
+18. DATASET CHO EVALUATION
+======================================================================
+
+A. Entity resolution
+- ER-Magellan
+- DeepMatcher benchmark
+- WDC product matching
+- Machamp
+- synthetic noisy customer records.
+
+B. Tool calling
+- BFCL
+- tự tạo test suite 100-500 cases theo MCP schemas thật.
+
+C. Conflict reasoning
+Tự tạo "case bundles":
+Case:
+- customer message
+- order record
+- payment record
+- logistics events
+- seller message
+- proof-of-delivery
+- timestamps.
+
+Inject conflict có kiểm soát:
+- stale status
+- duplicate customer
+- same name different customer
+- delivered scan nhưng missing POD
+- wrong tracking number
+- refund before delivery
+- payment reversed.
+
+Do synthetic mutation từ real dataset sẽ tốt hơn viết tay toàn bộ.
+
+======================================================================
+19. NẾU BẠN DÙNG OLIST E-COMMERCE
+======================================================================
+
+Olist phù hợp làm nền dữ liệu transactional cho demo, nhưng KHÔNG có đầy đủ customer-support logs/MCP investigation records.
+
+Có thể dùng:
+- orders
+- customers
+- order_items
+- sellers
+- payments
+- reviews
+- geolocation
+
+rồi tạo investigation cases.
+
+Ví dụ case:
+"Khách nói hàng đến trễ và muốn biết ai chịu trách nhiệm."
+
+Evidence:
+- purchase timestamp
+- approval timestamp
+- carrier handoff
+- estimated delivery
+- actual delivery
+- seller
+- customer location
+- review.
+
+Có thể inject:
+- một tracking API giả,
+- customer complaint message,
+- seller support ticket,
+- carrier scan log.
+
+Lúc đó bài toán agent có ground truth từ Olist + conflict synthetic.
+
+Một scenario tốt:
+
+Customer C:
+  "Tôi chưa nhận được hàng."
+
+Tool 1: order_db
+  status = delivered
+
+Tool 2: tracking_service
+  delivered_at = T
+
+Tool 3: pod_service
+  no proof-of-delivery
+
+Tool 4: customer_master
+  2 candidate customer profiles giống nhau
+
+Expected:
+- resolve đúng customer,
+- không nói "customer đã nhận",
+- phát hiện conflict giữa status và claim,
+- request POD hoặc carrier investigation,
+- final = UNRESOLVED / requires follow-up,
+- cite đúng evidence IDs.
+
+Đây là test khó và có giá trị hơn dashboard Olist thông thường.
+
+======================================================================
+20. TEST SET NÊN CHIA THEO ĐỘ KHÓ
+======================================================================
+
+Level 0 - deterministic
+- exact ID
+- không conflict
+- 1 tool.
+
+Level 1 - simple ambiguity
+- typo name
+- 2 candidates
+- 2-3 tools.
+
+Level 2 - semantic conflict
+- customer vs logistics
+- timestamp mismatch
+- duplicate IDs.
+
+Level 3 - adversarial
+- irrelevant evidence,
+- stale source,
+- missing fields,
+- tool error,
+- misleading review text,
+- conflicting evidence.
+
+Level 4 - budget pressure
+- nhiều candidate,
+- giới hạn 5-8 calls,
+- pipeline phải ưu tiên tool hữu ích.
+
+Chỉ khi Level 0-2 ổn mới tối ưu Level 3-4.
+
+======================================================================
+21. ABLATION STUDY RẤT NÊN LÀM
+======================================================================
+
+Đây là phần giúp report "có chất nghiên cứu".
+
+Compare:
+
+A. Single LLM, all data in prompt
+B. Multi-agent free chat
+C. Deterministic pipeline + one LLM
+D. C + hybrid entity resolution
+E. D + evidence verifier
+F. E + constrained output
+
+Đo:
+- accuracy
+- unsupported claims
+- tool calls
+- tokens
+- latency
+- JSON validity.
+
+Hypothesis:
+C/D/E/F sẽ đáng tin hơn multi-agent free chat với small model,
+dù nghe ít "agentic" hơn.
+
+======================================================================
+22. FINE-TUNING CÓ CẦN KHÔNG?
+======================================================================
+
+Không fine-tune ngay.
+
+Thứ tự:
+1. baseline prompt + schema
+2. improve deterministic logic
+3. improve blocking/retrieval
+4. collect failure cases
+5. chỉ fine-tune nếu failure lặp lại có pattern.
+
+Nếu fine-tune:
+- LoRA/QLoRA
+- training examples cho:
+  * entity pair judgment,
+  * tool selection,
+  * conflict classification,
+  * schema adherence.
+
+Không nên fine-tune final narrator trước.
+Tập trung task hẹp có label rõ.
+
+======================================================================
+23. QUANTIZATION
+======================================================================
+
+Nếu local:
+- 8B Q4_K_M thường chạy được trên máy hạn chế VRAM/RAM hơn.
+- Nhưng benchmark tool calling sau quantization; đừng giả định chất lượng giữ nguyên.
+
+Tool calling / JSON đôi khi nhạy với quantization hơn conversational quality.
+
+Do đó test:
+FP16/BF16 (nếu có)
+vs Q8
+vs Q4_K_M
+
+Trên cùng 100 case:
+- exact tool-call correctness
+- schema pass rate
+- entity resolution F1.
+
+Chọn quantization bằng metric task, không bằng cảm giác chat.
+
+======================================================================
+24. IMPLEMENTATION STACK ĐỀ XUẤT
+======================================================================
+
+Core:
+- Python 3.11+
+- Pydantic v2
+- FastAPI
+
+Workflow:
+- LangGraph
+hoặc tự viết explicit state machine.
+
+Inference:
+- vLLM / SGLang
+- Qwen3-8B hoặc Ministral 3 8B
+
+MCP:
+- official MCP Python SDK / FastMCP
+
+Storage:
+- DuckDB cho MVP
+- PostgreSQL nếu multi-user
+- optional Qdrant/FAISS cho candidate retrieval.
+
+ER:
+- Splink
+- RapidFuzz
+- sentence-transformers
+- optional Ditto / pyJedAI benchmark.
+
+Observability:
+- structured JSON logs
+- OpenTelemetry
+- Langfuse optional.
+
+Testing:
+- pytest
+- golden-case JSON files
+- deterministic replay.
+
+======================================================================
+25. FOLDER STRUCTURE GỢI Ý
+======================================================================
+
+project/
+  app/
+    orchestrator/
+      state.py
+      router.py
+      budget.py
+
+    agents/
+      planner.py
+      collector.py
+      entity_resolver.py
+      conflict_resolver.py
+      narrator.py
+
+    evidence/
+      models.py
+      store.py
+      verifier.py
+
+    entity_resolution/
+      normalize.py
+      blocking.py
+      scoring.py
+      llm_judge.py
+
+    tools/
+      mcp_client.py
+      adapters/
+
+    schemas/
+      messages.py
+      outputs.py
+
+    eval/
+      metrics.py
+      runner.py
+
+  tests/
+    cases/
+      l0/
+      l1/
+      l2/
+      adversarial/
+
+  scripts/
+    run_benchmark.py
+    build_synthetic_cases.py
+
+======================================================================
+26. PSEUDOCODE END-TO-END
+======================================================================
+
+def investigate(query):
+
+    state = init_case(query)
+
+    intent = classify_intent(query)
+
+    plan = build_plan(intent)
+
+    while not state.done:
+
+        step = deterministic_router(state, plan)
+
+        if step == "collect":
+            result = call_next_tool(state)
+            evidence = normalize_to_evidence(result)
+            evidence_store.add(evidence)
+
+        elif step == "entity_resolution":
+            candidates = blocking(state.entities)
+            scores = probabilistic_score(candidates)
+
+            ambiguous = select_ambiguous(scores)
+
+            if ambiguous:
+                llm_result = llm_entity_judge(ambiguous)
+                validate_schema(llm_result)
+
+            update_entities(...)
+
+        elif step == "claims":
+            build_claim_ledger_from_evidence()
+
+        elif step == "conflicts":
+            conflicts = deterministic_conflict_scan()
+
+            for semantic_conflict in unresolved:
+                result = llm_conflict_classifier(...)
+                validate_schema(result)
+
+        elif step == "verify":
+            errors = verify_case(state)
+
+            if not errors:
+                state.done = True
+
+            elif can_retrieve_more(errors) and state.budget > 0:
+                add_targeted_tool_steps(errors)
+
+            else:
+                state.done = True
+                state.requires_human = True
+
+    final = narrator(verified_case_view(state))
+    validate_final(final)
+
+    return final
+
+======================================================================
+27. VERIFIER NÊN KIỂM TRA GÌ?
+======================================================================
+
+Hard checks:
+[ ] all evidence IDs exist
+[ ] all entity IDs exist
+[ ] all tool names allowed
+[ ] no call exceeds budget
+[ ] final JSON validates
+[ ] required fields present
+[ ] timestamps parsable
+[ ] no impossible temporal ordering
+[ ] no high-severity claim without evidence
+[ ] no resolved conflict without resolution evidence
+[ ] no candidate outside candidate list selected.
+
+Soft checks:
+[ ] suspicious confidence
+[ ] source too stale
+[ ] only one weak source
+[ ] semantic contradiction
+[ ] insufficient evidence diversity.
+
+Nếu hard check fail:
+NO FINAL SUCCESS.
+
+======================================================================
+28. FAILURE MODES CẦN DỰ ĐOÁN
+======================================================================
+
+1. Agent hallucinated evidence_id
+Fix:
+evidence IDs chỉ được chọn từ enum/list hiện có + validator.
+
+2. Agent gọi sai tool
+Fix:
+route bằng rules trước, LLM chỉ khi ambiguous.
+
+3. Tool result quá dài
+Fix:
+adapter + evidence extraction trước LLM.
+
+4. Entity merge nhầm
+Fix:
+blocking + probabilistic scoring + conservative threshold.
+
+5. "LLM confidence = 0.95" nhưng sai
+Fix:
+không coi self-confidence là calibrated probability.
+
+6. Infinite loop
+Fix:
+hard tool budget + max replan + explicit termination.
+
+7. Multi-agent context explosion
+Fix:
+state ngoài LLM, chỉ gửi task-local context.
+
+8. Narrator thêm chi tiết không có trong state
+Fix:
+narrator chỉ nhận verified claim graph, verifier scan output.
+
+9. Conflict bị "ép" phải chọn bên thắng
+Fix:
+cho phép UNRESOLVED.
+
+10. JSON đôi lúc lỗi
+Fix:
+constrained output + schema + one retry.
+
+======================================================================
+29. MVP 2 TUẦN
+======================================================================
+
+Ngày 1-2
+- chốt schema
+- chốt evidence model
+- tạo 30 golden cases.
+
+Ngày 3-4
+- MCP mock servers
+- deterministic supervisor
+- tool budget.
+
+Ngày 5-6
+- entity normalization + blocking + Splink/RapidFuzz
+- entity resolution test.
+
+Ngày 7
+- Qwen3-8B integration
+- structured outputs.
+
+Ngày 8
+- claim ledger + conflict detection.
+
+Ngày 9
+- verifier.
+
+Ngày 10
+- narrator.
+
+Ngày 11
+- 100-200 benchmark cases.
+
+Ngày 12
+- ablation A/B/C.
+
+Ngày 13
+- optimize prompt/model/threshold.
+
+Ngày 14
+- report + demo.
+
+======================================================================
+30. RESEARCH QUESTIONS ĐÁNG ĐỂ ĐƯA VÀO REPORT
+======================================================================
+
+RQ1.
+Hybrid deterministic + small LLM có tốt hơn free-form multi-agent
+về grounded accuracy và cost không?
+
+RQ2.
+Entity blocking làm giảm bao nhiêu LLM calls mà vẫn giữ candidate recall?
+
+RQ3.
+Evidence verifier giảm unsupported claim rate bao nhiêu?
+
+RQ4.
+Qwen3-8B vs Ministral 3 8B:
+model nào tốt hơn về function calling + structured output trong domain này?
+
+RQ5.
+Model quantization Q4 ảnh hưởng thế nào tới tool correctness?
+
+RQ6.
+Đâu là tool budget nhỏ nhất vẫn đạt target accuracy?
+
+RQ7.
+Có lợi không nếu dùng cùng một 8B model cho tất cả agent roles
+so với mỗi role một model khác?
+
+======================================================================
+31. ĐỀ XUẤT BASELINE THỰC NGHIỆM
+======================================================================
+
+Baseline B0:
+Qwen3-8B, single prompt, all evidence.
+
+B1:
+Qwen3-8B + tool calling.
+
+B2:
+B1 + deterministic state machine.
+
+B3:
+B2 + hybrid entity resolution.
+
+B4:
+B3 + evidence store + provenance gate.
+
+B5:
+B4 + conflict resolver + verifier.
+
+Đây là cách chứng minh từng component thực sự tạo giá trị.
+
+======================================================================
+32. TIÊU CHÍ "ĐỦ TỐT ĐỂ DEMO"
+======================================================================
+
+Một target hợp lý cho MVP:
+- 100% valid evidence references
+- >=99% schema-valid final JSON sau retry
+- >=90% entity F1 trên test nội bộ
+- 0 hallucinated high-severity evidence
+- >=90% correct conflict classification
+- <=8 tool calls/case median
+- timeout / infinite loop = 0
+- có ít nhất 100 golden cases
+- có 10-20 adversarial cases.
+
+Không cần target SOTA.
+Cần chứng minh architecture tăng reliability một cách đo được.
+
+======================================================================
+33. KẾT LUẬN
+======================================================================
+
+Với model <=10B, chìa khóa không phải "tìm model thông minh gần GPT-4 nhất".
+
+Chìa khóa là ép bài toán về dạng mà model nhỏ làm tốt:
+
+- candidate set nhỏ,
+- context nhỏ,
+- schema rõ,
+- task một nghĩa,
+- deterministic logic bên ngoài,
+- evidence bắt buộc,
+- retry hữu hạn,
+- state machine,
+- benchmark có ground truth.
+
+Kiến trúc đề xuất:
+
+          deterministic supervisor
+                   |
+       +-----------+-----------+
+       |                       |
+   MCP/evidence             ER engine
+       |                block -> score
+       |                       |
+       +---------> LLM tie-breaker
+                   |
+              claim ledger
+                   |
+             conflict engine
+                   |
+                verifier
+                   |
+             Qwen3-8B narrator
+
+Nếu phải chọn một hướng để bắt đầu:
+1) Qwen3-8B,
+2) LangGraph hoặc state machine tự viết,
+3) Splink + RapidFuzz/embedding cho ER,
+4) Pydantic schema,
+5) MCP mock services,
+6) evidence ledger,
+7) 100-case benchmark trước khi làm UI.
+
+======================================================================
+34. TÀI LIỆU / REPO THAM KHẢO
+======================================================================
+
+[1] Qwen3 - Function Calling
+https://github.com/QwenLM/Qwen3/blob/main/docs/source/framework/function_call.md
+
+[2] Qwen-Agent
+https://github.com/QwenLM/Qwen-Agent
+
+[3] Qwen3 concepts - tool calling
+https://github.com/QwenLM/Qwen3/blob/main/docs/source/getting_started/concepts.md
+
+[4] Ministral 3 8B
+https://docs.mistral.ai/models/ministral-3-8b-25-12
+
+[5] Mistral Structured Outputs
+https://docs.mistral.ai/studio/conversations/structured-output
+
+[6] Mistral Function Calling
+https://docs.mistral.ai/studio/conversations/function-calling
+
+[7] Gemma 3 model card
+https://ai.google.dev/gemma/docs/core/model_card_3
+
+[8] Berkeley Function Calling Leaderboard / BFCL
+https://github.com/EnlightenedAI/BFCL
+
+[9] AutoGen Selector Group Chat
+https://microsoft.github.io/autogen/dev/user-guide/agentchat-user-guide/selector-group-chat.html
+
+[10] AutoGen Group Chat design pattern
+https://microsoft.github.io/autogen/dev/user-guide/core-user-guide/design-patterns/group-chat.html
+
+[11] LangGraph Multi-Agent Supervisor
+https://langchain-ai.github.io/langgraphjs/reference/modules/langgraph-supervisor.html
+
+[12] Splink
+https://moj-analytical-services.github.io/splink/
+
+[13] Splink - Blocking
+https://moj-analytical-services.github.io/splink/demos/tutorials/03_Blocking.html
+
+[14] Splink - Record Linkage
+https://moj-analytical-services.github.io/splink/topic_guides/theory/record_linkage.html
+
+[15] Ditto: Deep Entity Matching
+https://github.com/megagonlabs/ditto
+
+[16] Machamp Entity Matching Benchmark
+https://github.com/megagonlabs/machamp
+
+[17] pyJedAI
+https://github.com/AI-team-UoA/pyJedAI
+
+[18] Kaggle - Agentic Investigation Board
+https://www.kaggle.com/competitions/vibecoding-agents-capstone-project/writeups/agentic-investigation-board
+
+[19] Kaggle - IncidentZero-AI
+https://www.kaggle.com/competitions/build-with-gemma-ml-nashik/writeups/incidentzero-ai-autonomous-multi-agent-soc-invest
+
+[20] Kaggle - Veritas AI
+https://www.kaggle.com/competitions/agents-intensive-capstone-project/writeups/veritas-ai-the-misinformation-shield
+
+[21] Kaggle - Smart Personal Research Assistant
+https://www.kaggle.com/competitions/agents-intensive-capstone-project/writeups/smart-personal-research-assistant
+
+
+======================================================================
+35. CHECKLIST TRƯỚC KHI CODE
+======================================================================
+
+[ ] Có ground truth cases chưa?
+[ ] Evidence schema đã immutable chưa?
+[ ] Entity ID và evidence ID có deterministic không?
+[ ] Tool budget đã hard-code chưa?
+[ ] Có UNRESOLVED state không?
+[ ] Có human-review state không?
+[ ] Supervisor có thể chạy không cần LLM ở common path không?
+[ ] Candidate blocking có recall test chưa?
+[ ] JSON schema có validator chưa?
+[ ] Có replay log cho từng case chưa?
+[ ] Có benchmark Qwen3-8B vs Ministral 3 8B chưa?
+[ ] Có ablation single-agent vs pipeline chưa?
+[ ] Có đo hallucinated evidence chưa?
+[ ] Có adversarial cases chưa?
+
+END OF REPORT
