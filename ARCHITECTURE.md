@@ -50,7 +50,7 @@ Least privilege: mỗi actor chỉ gọi tool của domain mình. Tool discovery
 1. `EvidenceGateway.call` validate response với schema, lỗi tool (`is_error`) được raise thành `RuntimeError`.
 2. `Investigation.fetch` cache kết quả theo `(tool, arguments)` trong phạm vi một case, nên không bao giờ gọi trùng. Mỗi kết quả emit `tool_result_consumed` kèm `evidence_ref`.
 3. Chọn source: dòng lịch sử khách hàng của timeline đã chọn là nguồn authoritative. `get_order` trả về lần mua mới nhất của order id, nên khi lệch với timeline đã chọn thì ghi `data_conflicts` với `selected_source = customer_history` và `resolution_code = CASE_TIME_WINDOW`.
-4. Mapping evidence: `evidence_refs` của output chỉ trích các nguồn hỗ trợ kết luận chính của topic. Với `late_delivery_*` và `unsupported_claim`, payment timeline vẫn được gọi để điền `payment_analysis` nhưng không được trích (`UNCITED_TOOLS`); lời gọi đó vẫn nằm trong trace. `claim_assessments[].evidence_refs` luôn là tập con của `evidence_refs`.
+4. Mapping evidence: `evidence_refs` của output chỉ trích các nguồn hỗ trợ kết luận chính của topic. Với `late_delivery_*` và `unsupported_claim`, payment timeline vẫn được gọi để điền `payment_analysis` nhưng không được trích; với `unsupported_claim` shipment summary cũng không được trích vì kết luận "giao đúng hạn" dựa trên ngày giao/ngày dự kiến của timeline đã chọn (`UNCITED_TOOLS`). Các lời gọi đó vẫn nằm trong trace. `claim_assessments[].evidence_refs` luôn là tập con của `evidence_refs`.
 5. Evidence không dùng chéo case: verifier kiểm tra mọi ref thuộc tập ref của case đó.
 
 ## 5. Failure and efficiency policy

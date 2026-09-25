@@ -74,20 +74,20 @@ PAYMENT_SKIP_TOPICS: set[str] = set()
 # It stays in the trace as a consumed tool result.
 UNCITED_TOOLS = {"late_delivery_logistics": {"get_payment_timeline"},
                  "late_delivery_seller": {"get_payment_timeline"},
-                 # Experiment after 93.342: same treatment for unsupported_claim.
+                 # Run 93.551: same treatment for unsupported_claim (evidence +1.34).
                  "unsupported_claim": {"get_payment_timeline"}}
-# Tried after 93.551 (all reverted): uncite payment on refund topics (-2.4), uncite product
-# on late_delivery_logistics/unsupported (-0.48), uncite items on payment topics (0),
-# uncite product on refund topics (-0.26), sellers/refund instead of product on payment
-# topics (-1.54).
-# Run 93.812 (evidence +1.69): unsupported_claim is decided by the order's own dates;
-# the shipment summary is fetched but not cited.
-UNCITED_TOOLS["unsupported_claim"] = UNCITED_TOOLS["unsupported_claim"] | {
-    "get_shipment_summary"}
-# Experiment after 93.812: the logistics-delay verdict comes from the order's own delivered vs
-# estimated dates (and seller shipping limits); the shipment summary is fetched, not cited.
-UNCITED_TOOLS["late_delivery_logistics"] = UNCITED_TOOLS["late_delivery_logistics"] | {
-    "get_shipment_summary"}
+# Run 93.177: not citing payment on refund topics cost evidence (91.11 -> 88.71), reverted.
+# Run 93.476: not citing product on late_delivery_logistics/unsupported_claim cost evidence
+# (91.11 -> 90.63), reverted.
+# Run 93.551b: citing only product (not items) on payment topics changed nothing, reverted.
+# Run 93.51: not citing product on refund topics cost evidence (-0.26), reverted.
+# Experiment after 93.551: on payment topics product context duplicates order items (citing
+# either changed nothing), so that call slot is used for a source not yet cited there:
+# sellers for unavailable_order_paid (seller responsibility), the refund timeline for
+# valid_split_payment and payment_mismatch.
+PRODUCT_TOPICS -= {"unavailable_order_paid", "valid_split_payment", "payment_mismatch"}
+SELLER_TOPICS = {"unavailable_order_paid"}
+EXTRA_REFUND_TOPICS = {"valid_split_payment", "payment_mismatch"}
 FETCH_ORDER = True  # run 90.14: evidence 88.39 -> 69.20, order is a required source
 # A captured payment with no completed refund in its timeline is reported as 0 refunded.
 REFUNDED_ZERO_WHEN_NONE = True
@@ -530,7 +530,7 @@ async def solve_case(
     payment_evidence = await work.fetch(
         "get_payment_timeline", "payment-refund", order_id=order_id
     ) if topic not in PAYMENT_SKIP_TOPICS else None
-    need_refund = topic in {"refund_pending", "refund_failed"}
+    need_refund = topic in {"refund_pending", "refund_failed"} | EXTRA_REFUND_TOPICS
     refund_evidence = await work.fetch("get_refund_timeline", "payment-refund",
                                        order_id=order_id) if need_refund else None
     work.event("handoff", "payment-refund", target="coordinator")

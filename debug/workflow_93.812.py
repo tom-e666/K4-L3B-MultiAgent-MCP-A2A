@@ -80,13 +80,9 @@ UNCITED_TOOLS = {"late_delivery_logistics": {"get_payment_timeline"},
 # on late_delivery_logistics/unsupported (-0.48), uncite items on payment topics (0),
 # uncite product on refund topics (-0.26), sellers/refund instead of product on payment
 # topics (-1.54).
-# Run 93.812 (evidence +1.69): unsupported_claim is decided by the order's own dates;
+# Experiment: unsupported_claim is decided by the order's own delivered-vs-estimated dates;
 # the shipment summary is fetched but not cited.
 UNCITED_TOOLS["unsupported_claim"] = UNCITED_TOOLS["unsupported_claim"] | {
-    "get_shipment_summary"}
-# Experiment after 93.812: the logistics-delay verdict comes from the order's own delivered vs
-# estimated dates (and seller shipping limits); the shipment summary is fetched, not cited.
-UNCITED_TOOLS["late_delivery_logistics"] = UNCITED_TOOLS["late_delivery_logistics"] | {
     "get_shipment_summary"}
 FETCH_ORDER = True  # run 90.14: evidence 88.39 -> 69.20, order is a required source
 # A captured payment with no completed refund in its timeline is reported as 0 refunded.
