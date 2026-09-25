@@ -184,3 +184,13 @@ Nếu đạt các mức này, tổng theo trọng số xấp xỉ **89.7**. Đâ
 - Không tối ưu theo một vài case public bằng hard-coded case ID, amount hoặc timestamp.
 - Không tạo/sửa `evidence_ref`, không dùng ref chéo case và không bỏ validation trước finalize.
 - Không chọn final chỉ dựa trên tổng public; cần ưu tiên logic có khả năng tổng quát vì private chiếm 80%.
+
+## 7. Implementation cuối cho nhóm canceled order paid
+
+Phân tích thủ công các case `008, 018, 028, 038, 048, 058, 068, 078, 088, 098` cho thấy cùng một mẫu: customer history xác nhận order đã hủy, payment timeline có capture `79.0 BRL`, còn item + freight là `97.0 BRL`. Logic cũ yêu cầu capture khớp tổng item + freight nên trả `payment.verdict = insufficient_evidence`, dù capture và policy refund đều rõ ràng.
+
+Bản sửa áp dụng quy tắc tổng quát theo issue thay vì hard-code case ID hoặc amount: với `canceled_order_paid`/`unavailable_order_paid`, một confirmed capture không duplicate và không mismatch là đủ để payment `reconciled`; refund vẫn lấy từ policy và không vượt refundable balance. Targeted run trên cả 10 case đều cho `captured=79.0`, `recommended_refund=79.0`, payment `reconciled`; mỗi claim dùng 4 refs liên quan thay vì toàn bộ 6 refs của case.
+
+Workflow đồng thời chuyển `get_order` thành fallback sau customer history và đặt mọi specialist handoff sau call cuối của actor. Unit test khóa regression cho reconciliation, scoped evidence và thứ tự `policy_decided → handoff → verification_completed`.
+
+Lượt clean run 100 case ngày 2026-09-25 bị dừng ở case 59 vì MCP gateway bắt đầu lỗi liên tục từ case 45. Artifact dở dang này không được dùng để đóng gói hoặc nộp; cần chạy lại từ đầu khi gateway ổn định.

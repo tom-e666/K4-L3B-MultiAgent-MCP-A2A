@@ -52,7 +52,7 @@ Nếu item rows trùng hoàn toàn, tổng giá chỉ tính một lần. Với s
 | Source conflict | Không gọi thêm để quét rộng | Chọn row khớp thời điểm case; ghi conflict | `data_conflicts`, `TEMPORAL_CASE_MATCH` |
 | Invalid specialist result | Gateway schema validation; 0 retry | Bỏ result, giảm mức chắc chắn | Warning log; verifier code `NO_EVIDENCE` nếu cần |
 
-Budget mục tiêu: 2 call entity, 3 call specialist cơ bản, 1 call product theo scope, 1 call policy; refund timeline chỉ cho `refund_pending`/`refund_failed` và seller chỉ cho seller delay. Trong run đầu, `get_refund_timeline` trả lỗi ở mọi case canceled/unavailable không có refund event, nên bỏ 20 call thừa đó ở các run tiếp theo. Không gọi candidate placeholder, không gọi `get_order_payments` vì payment timeline đã chứa payment rows. Catalog MCP được cache trong session; evidence chỉ cache trong phạm vi một case. Không có retry tự động, tránh call dư được audit.
+Budget mục tiêu: 1 call entity bằng `get_customer_history`; `get_order` chỉ là fallback khi history không resolve được claimed ID. Sau đó có 3 call specialist cơ bản, 1 call product theo scope và 1 call policy; refund timeline chỉ cho `refund_pending`/`refund_failed`, seller chỉ cho seller delay. Trong run đầu, `get_refund_timeline` trả lỗi ở mọi case canceled/unavailable không có refund event, nên bỏ 20 call thừa đó ở các run tiếp theo. Không gọi candidate placeholder, không gọi `get_order_payments` vì payment timeline đã chứa payment rows. Catalog MCP được cache trong session; evidence chỉ cache trong phạm vi một case. Không có retry tự động, tránh call dư được audit.
 
 ## 6. Verification invariants
 
@@ -60,6 +60,7 @@ Budget mục tiêu: 2 call entity, 3 call specialist cơ bản, 1 call product t
 - Resolved ID phải thuộc candidate thật; placeholder bị reject và không được gọi MCP.
 - Item, shipment, payment và refund được lọc vào giao dịch đã chọn; event trước purchase hoặc sau lần mua tiếp theo không được tính.
 - `captured_total_brl` tính từ confirmed capture, `refunded_total_brl` từ confirmed refund, `recommended_refund_brl` không vượt số tiền còn có thể hoàn và bằng 0 nếu không có action.
+- Với đơn canceled/unavailable, confirmed capture đủ để payment được `reconciled`; chênh lệch với item + freight không được biến capture thật thành thiếu evidence. Refund vẫn bị chặn bởi policy và refundable balance.
 - Claim, issue, responsible party và action được chọn từ evidence cùng policy version; bất đồng nguồn được ghi trong `data_conflicts`.
 - Mọi `evidence_ref` trong output xuất phát từ response MCP của case đó và có event `tool_result_consumed`; confidence luôn trong [0, 1].
 

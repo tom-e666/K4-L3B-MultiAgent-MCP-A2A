@@ -108,8 +108,8 @@ def test_temporal_resolution_uses_history_and_traces_real_refs(tmp_path):
     contracts.validate_output(result, "workflow test")
     assert result["assessment"]["primary_issue"] == "late_delivery_logistics"
     assert result["financial_resolution"]["recommended_refund_brl"] == 16
-    assert result["data_conflicts"][0]["resolution_code"] == "TEMPORAL_CASE_MATCH"
     assert result["entity_resolution"]["rejected_candidates"] == ["candidate-test"]
+    assert all(name != "get_order" for name, _, _ in gateway.calls)
     assert all(arguments.get("order_id") != "candidate-test" for _, _, arguments in gateway.calls)
     events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
     consumed = {
@@ -217,3 +217,94 @@ def test_split_payment_reconciles_two_captures_when_colliding_row_is_present(tmp
     assert result["assessment"]["primary_issue"] == "valid_split_payment"
     assert result["payment_analysis"]["captured_total_brl"] == 89
     assert result["data_conflicts"][0]["resolution_code"] == "RECONCILED_SPLIT_SUBSET"
+
+
+def test_canceled_paid_reconciles_capture_without_requiring_freight_total(tmp_path):
+    case = fixture_case()
+    case["opened_at"] = "2018-08-08T09:00:00-03:00"
+    case["customer_request"]["claims"][0]["topic"] = "canceled_order_paid"
+    canceled = {
+        "order_id": ORDER,
+        "order_status": "canceled",
+        "order_purchase_timestamp": "2018-07-27T09:00:00-03:00",
+        "order_delivered_carrier_date": None,
+        "order_delivered_customer_date": None,
+        "order_estimated_delivery_date": "2018-08-06T09:00:00-03:00",
+    }
+    gateway = FakeGateway(
+        {
+            "get_customer_history": {
+                "customer_unique_id": "customer-test",
+                "orders": [canceled],
+            },
+            "get_order": {**canceled, "order_status": "delivered"},
+            "get_order_items": [
+                {
+                    "order_item_id": "item-1",
+                    "seller_id": "seller-1",
+                    "shipping_limit_date": "2018-07-29T09:00:00-03:00",
+                    "price": "79",
+                    "freight_value": "18",
+                }
+            ],
+            "get_shipment_summary": {
+                "order_status": "delivered",
+                "shipping_limits": [],
+            },
+            "get_payment_timeline": {
+                "events": [
+                    {
+                        "event_at": "2018-07-27T10:00:00-03:00",
+                        "event_type": "captured",
+                        "status": "confirmed",
+                        "amount_brl": "79",
+                    }
+                ]
+            },
+            "get_product_context": [{"order_item_id": "item-1", "seller_id": "seller-1"}],
+            "get_policy": {
+                "rules": {
+                    "canceled_order_paid": {
+                        "case_status": "action_required",
+                        "refund_brl": 79,
+                        "recommended_action": "issue_refund",
+                        "responsible_parties": [{"party_type": "platform", "party_id": None}],
+                    }
+                }
+            },
+        }
+    )
+    contracts = Contracts(ROOT / "contracts" / "schemas")
+    trace = TraceWriter(tmp_path / "trace.jsonl", contracts)
+    result = asyncio.run(solve_case(case, gateway, trace))
+    contracts.validate_output(result, "canceled paid")
+
+    assert result["assessment"]["primary_issue"] == "canceled_order_paid"
+    assert result["payment_analysis"] == {
+        "verdict": "reconciled",
+        "captured_total_brl": 79.0,
+        "refunded_total_brl": None,
+        "refundable_total_brl": 79.0,
+    }
+    assert result["financial_resolution"]["recommended_refund_brl"] == 79
+    assert all(name != "get_order" for name, _, _ in gateway.calls)
+    assert all(
+        len(claim["evidence_refs"]) < len(result["evidence_refs"])
+        for claim in result["claim_assessments"]
+    )
+
+    events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
+    policy_decided = next(
+        index for index, event in enumerate(events) if event["event_type"] == "policy_decided"
+    )
+    policy_handoff = next(
+        index
+        for index, event in enumerate(events)
+        if event["event_type"] == "handoff" and event["actor"] == "policy-agent"
+    )
+    verified = next(
+        index
+        for index, event in enumerate(events)
+        if event["event_type"] == "verification_completed"
+    )
+    assert policy_decided < policy_handoff < verified

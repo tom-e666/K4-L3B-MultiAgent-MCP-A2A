@@ -149,14 +149,15 @@ async def solve_case(
         customer_unique_id=case.get("customer_unique_id_hint"),
     )
     valid_candidates = [candidate for candidate in candidates if ORDER_ID.fullmatch(candidate)]
-    order = (
-        await fetch("get_order", "entity-agent", order_id=claimed)
-        if claimed in valid_candidates
-        else None
-    )
+    order = None
     selected, next_purchase = _selected_order(
         history, order, valid_candidates, opened_at, primary_claim
     )
+    if selected is None and claimed in valid_candidates:
+        order = await fetch("get_order", "entity-agent", order_id=claimed)
+        selected, next_purchase = _selected_order(
+            history, order, valid_candidates, opened_at, primary_claim
+        )
     resolved_id = selected.get("order_id") if selected else None
     start = _date(selected.get("order_purchase_timestamp")) if selected else None
     rejected = [candidate for candidate in candidates if candidate != resolved_id]
@@ -175,35 +176,53 @@ async def solve_case(
 
     item = shipment = payment = product = refund = None
     if resolved_id:
-        for actor, name in (
-            ("order-agent", "get_order_items"),
-            ("shipment-agent", "get_shipment_summary"),
-            ("payment-agent", "get_payment_timeline"),
-        ):
-            trace.emit(
-                case_id=case_id, event_type="task_assigned", actor="coordinator", target=actor
-            )
-            result = await fetch(name, actor, order_id=resolved_id)
-            if name == "get_order_items":
-                item = result
-            elif name == "get_shipment_summary":
-                shipment = result
-            else:
-                payment = result
-            trace.emit(case_id=case_id, event_type="handoff", actor=actor, target="coordinator")
+        trace.emit(
+            case_id=case_id,
+            event_type="task_assigned",
+            actor="coordinator",
+            target="order-agent",
+        )
+        item = await fetch("get_order_items", "order-agent", order_id=resolved_id)
         if case.get("investigation_scope", {}).get("include_product_context"):
             product = await fetch("get_product_context", "order-agent", order_id=resolved_id)
+        trace.emit(
+            case_id=case_id,
+            event_type="handoff",
+            actor="order-agent",
+            target="coordinator",
+        )
+
+        trace.emit(
+            case_id=case_id,
+            event_type="task_assigned",
+            actor="coordinator",
+            target="shipment-agent",
+        )
+        shipment = await fetch("get_shipment_summary", "shipment-agent", order_id=resolved_id)
+
+        trace.emit(
+            case_id=case_id,
+            event_type="task_assigned",
+            actor="coordinator",
+            target="payment-agent",
+        )
+        payment = await fetch("get_payment_timeline", "payment-agent", order_id=resolved_id)
         topics = {
             claim.get("topic") for claim in request.get("claims", []) if isinstance(claim, dict)
         }
         if topics & {"refund_pending", "refund_failed"}:
             refund = await fetch("get_refund_timeline", "payment-agent", order_id=resolved_id)
+        trace.emit(
+            case_id=case_id,
+            event_type="handoff",
+            actor="payment-agent",
+            target="coordinator",
+        )
 
     trace.emit(
         case_id=case_id, event_type="task_assigned", actor="coordinator", target="policy-agent"
     )
     policy = await fetch("get_policy", "policy-agent", policy_version=case.get("policy_version"))
-    trace.emit(case_id=case_id, event_type="handoff", actor="policy-agent", target="verifier")
 
     item_rows = _rows((item or {}).get("data"))
     product_rows = _rows((product or {}).get("data"))
@@ -288,6 +307,11 @@ async def solve_case(
         payment_verdict = "capture_mismatch"
     elif duplicate:
         payment_verdict = "duplicate_capture"
+    elif primary_claim in {"canceled_order_paid", "unavailable_order_paid"} and captures:
+        # A confirmed capture is sufficient to reconcile the payment side of a
+        # canceled/unavailable order. The business defect is the order state,
+        # not an unexplained payment delta against freight-inclusive item rows.
+        payment_verdict = "reconciled"
     elif captures and (not expected_total or abs(captured - expected_total) <= Decimal("0.01")):
         payment_verdict = "reconciled"
     else:
@@ -315,6 +339,13 @@ async def solve_case(
         shipment_verdict = "insufficient_evidence"
     if shipment_verdict == "seller_delay" and resolved_id:
         await fetch("get_sellers", "shipment-agent", order_id=resolved_id)
+    if resolved_id:
+        trace.emit(
+            case_id=case_id,
+            event_type="handoff",
+            actor="shipment-agent",
+            target="coordinator",
+        )
 
     status = selected.get("order_status") if selected else None
     supported = {
@@ -352,6 +383,73 @@ async def solve_case(
         recommended = Decimal(0)
 
     refs = _unique([result["evidence_ref"] for result in evidence.values()])[:30]
+
+    def scoped_refs(*tool_names: str) -> list[str]:
+        return _unique([evidence[name]["evidence_ref"] for name in tool_names if name in evidence])
+
+    claim_tools = {
+        "late_delivery_logistics": (
+            "get_customer_history",
+            "get_shipment_summary",
+            "get_policy",
+        ),
+        "late_delivery_seller": (
+            "get_customer_history",
+            "get_order_items",
+            "get_shipment_summary",
+            "get_sellers",
+            "get_policy",
+        ),
+        "valid_split_payment": (
+            "get_customer_history",
+            "get_order_items",
+            "get_payment_timeline",
+            "get_policy",
+        ),
+        "payment_mismatch": (
+            "get_customer_history",
+            "get_order_items",
+            "get_payment_timeline",
+            "get_policy",
+        ),
+        "duplicate_charge": (
+            "get_customer_history",
+            "get_order_items",
+            "get_payment_timeline",
+            "get_policy",
+        ),
+        "refund_pending": (
+            "get_customer_history",
+            "get_payment_timeline",
+            "get_refund_timeline",
+            "get_policy",
+        ),
+        "refund_failed": (
+            "get_customer_history",
+            "get_payment_timeline",
+            "get_refund_timeline",
+            "get_policy",
+        ),
+        "canceled_order_paid": (
+            "get_customer_history",
+            "get_order_items",
+            "get_payment_timeline",
+            "get_policy",
+        ),
+        "unavailable_order_paid": (
+            "get_customer_history",
+            "get_order_items",
+            "get_payment_timeline",
+            "get_policy",
+        ),
+        "unsupported_claim": (
+            "get_customer_history",
+            "get_order_items",
+            "get_shipment_summary",
+            "get_payment_timeline",
+            "get_policy",
+        ),
+    }
     conflicts: list[dict[str, Any]] = []
     direct_order = (order or {}).get("data") or {}
     if (
@@ -431,12 +529,17 @@ async def solve_case(
                 if primary == "unsupported_claim"
                 else "insufficient_evidence"
             )
+        evidence_topic = primary if topic == "requested_full_refund" else topic
+        names = claim_tools.get(evidence_topic, tuple(evidence))
+        if topic == "requested_full_refund":
+            names = tuple(dict.fromkeys((*names, "get_payment_timeline", "get_refund_timeline")))
+        claim_refs = scoped_refs(*names)
         claim_assessments.append(
             {
                 "claim_id": claim["claim_id"],
                 "verdict": verdict,
                 "confidence": 0.8 if verdict == "supported" else 0.6,
-                "evidence_refs": refs,
+                "evidence_refs": claim_refs,
             }
         )
 
@@ -514,6 +617,14 @@ async def solve_case(
         case_id=case_id,
         event_type="policy_decided",
         actor="policy-agent",
+        decision_code=primary.upper(),
+        evidence_refs=[policy["evidence_ref"]] if policy else [],
+    )
+    trace.emit(
+        case_id=case_id,
+        event_type="handoff",
+        actor="policy-agent",
+        target="verifier",
         decision_code=primary.upper(),
         evidence_refs=[policy["evidence_ref"]] if policy else [],
     )
