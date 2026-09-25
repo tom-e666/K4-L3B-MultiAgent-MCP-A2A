@@ -151,6 +151,16 @@ day09 run
 day09 validate
 ```
 
+`day09 run` tạo một run mới trên Competition Workspace trước khi gọi MCP. Giữ
+nguyên Team API Key trong `.env` và không mở lại/refresh trang `/l3b` trong lúc
+thu thập evidence, vì trang có thể tạo run mới. Nếu đổi key hoặc run hết hạn,
+chạy lại `day09 run` cho toàn bộ 100 case; không dùng `--resume` với evidence cũ.
+CLI lưu dấu key và hạn run trong `traces/.run-context.json` (không nằm trong ZIP).
+
+Nếu MCP ngắt giữa chừng, chạy `day09 run --resume` để tiếp tục các case chưa
+hoàn tất. Có thể chạy lại một case bằng `day09 run --resume --case-id L3B_CASE_001`.
+Trace của case chỉ được thêm vào `trace.jsonl` khi case hoàn tất.
+
 Kết quả được tạo tại:
 
 ```text
@@ -165,6 +175,9 @@ Nếu output pass schema nhưng điểm thấp, cần kiểm tra semantic, entit
 ```bash
 day09 package --output dist/submission.zip
 ```
+
+Lệnh `package` chặn ZIP nếu Team API Key đã đổi, run hết hạn, hoặc trace được
+tạo trước credential hiện tại. Sau khi đóng gói, nộp khi run còn hiệu lực.
 
 ZIP chỉ được chứa:
 
