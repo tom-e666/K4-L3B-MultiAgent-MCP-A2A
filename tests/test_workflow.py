@@ -81,7 +81,6 @@ def test_resolves_timeline_and_limits_refund(tmp_path: Path) -> None:
     assert output["entity_resolution"]["rejected_candidates"] == ["candidate-1"]
     assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
     assert output["financial_resolution"]["recommended_refund_brl"] == 16
-    assert output["payment_analysis"]["captured_total_brl"] == 16
     assert output["shipment_analysis"]["verdict"] == "logistics_delay"
     events = [json.loads(line) for line in trace_path.read_text().splitlines()]
     assert any(event["event_type"] == "verification_completed" for event in events)

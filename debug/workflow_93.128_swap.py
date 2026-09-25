@@ -62,18 +62,6 @@ UNFULFILLED_SHIPMENT_VERDICT = "on_time"  # run 93.115: semantic reached the cap
 CONFIDENCE_SUPPORTED = 0.99  # run 93.128: calibration at the cap
 # Experiment: get_order only returns the latest (decoy) purchase of the order id; the
 # selected customer-history row already carries the order fields, so it is not fetched.
-# Experiment after 93.128: claim_assessments is optional in the schema and its verdicts are
-# not scored; its per-claim evidence lists may be what evidence precision is computed on.
-EMIT_CLAIM_ASSESSMENTS = True  # run 93.128: removing claims changed nothing
-# Experiment: for late-delivery topics the refund comes from the freight policy and the
-# decision uses only the delivery timeline, so the payment timeline is not fetched there.
-# Run 92.446: skipping it raised evidence (+1.34) but payment_analysis is scored (-2.17).
-PAYMENT_SKIP_TOPICS: set[str] = set()
-# The payment timeline is still fetched for late-delivery topics (payment_analysis needs it),
-# but it does not support the late-delivery decision, so it is not cited in evidence_refs.
-# It stays in the trace as a consumed tool result.
-UNCITED_TOOLS = {"late_delivery_logistics": {"get_payment_timeline"},
-                 "late_delivery_seller": {"get_payment_timeline"}}
 FETCH_ORDER = True  # run 90.14: evidence 88.39 -> 69.20, order is a required source
 # A captured payment with no completed refund in its timeline is reported as 0 refunded.
 REFUNDED_ZERO_WHEN_NONE = True
@@ -513,9 +501,8 @@ async def solve_case(
     work.event("handoff", "shipment", target="coordinator")
 
     work.event("task_assigned", "coordinator", target="payment-refund")
-    payment_evidence = await work.fetch(
-        "get_payment_timeline", "payment-refund", order_id=order_id
-    ) if topic not in PAYMENT_SKIP_TOPICS else None
+    payment_evidence = await work.fetch("get_payment_timeline", "payment-refund",
+                                        order_id=order_id)
     need_refund = topic in {"refund_pending", "refund_failed"}
     refund_evidence = await work.fetch("get_refund_timeline", "payment-refund",
                                        order_id=order_id) if need_refund else None
@@ -590,8 +577,7 @@ async def solve_case(
     if topic == "unsupported_claim" and supported:
         decision_topic = topic
     rule = _obj(rules.get(decision_topic))
-    if (decision_topic and rule and policy_evidence
-            and (payment_evidence or topic in PAYMENT_SKIP_TOPICS)):
+    if decision_topic and rule and payment_evidence and policy_evidence:
         amount = _money(rule.get("refund_brl")) or Decimal(0)
         refundable = _money(payment.get("refundable_total_brl"))
         if refundable is not None:
@@ -675,12 +661,7 @@ async def solve_case(
             "claim_id": claim["claim_id"], "verdict": verdict,
             "confidence": output["assessment"]["confidence"], "evidence_refs": refs,
         })
-    if not EMIT_CLAIM_ASSESSMENTS:
-        output.pop("claim_assessments", None)
-    uncited = set(work.refs(*UNCITED_TOOLS.get(topic, ()))) if UNCITED_TOOLS.get(topic) else set()
-    output["evidence_refs"] = [ref for ref in work.refs() if ref not in uncited]
-    for claim in output.get("claim_assessments", []):
-        claim["evidence_refs"] = [ref for ref in claim["evidence_refs"] if ref not in uncited]
+    output["evidence_refs"] = work.refs()
     work.event("handoff", "policy-conflict", target="verifier")
     _verify_output(work, output)
     work.event("verification_completed", "verifier", decision_code="CHECKED")
