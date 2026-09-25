@@ -151,6 +151,8 @@ day09 run
 day09 validate
 ```
 
+Nếu gateway ngắt giữa chừng, dùng `day09 run --resume` để chỉ xử lý các case chưa có output hợp lệ. Sau khi sửa logic cho một case, có thể dùng `day09 run --resume --force-case L3B_CASE_001` để chạy lại riêng case đó. Các lệnh này chỉ tạo output và trace local; chúng không đóng gói hoặc gửi bài.
+
 Kết quả được tạo tại:
 
 ```text
@@ -163,8 +165,10 @@ Nếu output pass schema nhưng điểm thấp, cần kiểm tra semantic, entit
 ## 7. Đóng gói và nộp bài
 
 ```bash
-day09 package --output dist/submission.zip
+day09 package
 ```
+
+Tên ZIP mặc định có timestamp UTC, ví dụ `dist/submission-20260925T080706Z.zip`, để các lần xuất không ghi đè nhau. Khi cần tên cụ thể, dùng `day09 package --output dist/ten-file.zip`.
 
 ZIP chỉ được chứa:
 
@@ -174,7 +178,7 @@ trace.jsonl
 outputs/<case_id>.json
 ```
 
-Không đưa source, input, `.env`, API key hoặc debug log vào ZIP. Sau đó upload `dist/submission.zip` tại workspace `/l3b` và chọn submission muốn dùng làm final.
+Không đưa source, input, `.env`, API key hoặc debug log vào ZIP. Sau đó upload đúng file `dist/submission-<timestamp>.zip` tại workspace `/l3b` và chọn submission muốn dùng làm final.
 
 ## Tiêu chí chấm điểm công khai
 

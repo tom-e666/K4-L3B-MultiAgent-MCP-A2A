@@ -16,6 +16,15 @@ MAX_FILE_BYTES = 1024 * 1024
 MAX_SUBMISSION_BYTES = 12 * 1024 * 1024
 
 
+def timestamped_submission_path(
+    directory: Path, generated_at: datetime | None = None
+) -> Path:
+    """Return a sortable, filesystem-safe UTC submission filename."""
+    moment = (generated_at or datetime.now(UTC)).astimezone(UTC)
+    timestamp = moment.strftime("%Y%m%dT%H%M%SZ")
+    return directory / f"submission-{timestamp}.zip"
+
+
 def _json_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from student_agent import OUTPUT_SCHEMA_VERSION, VARIANT_ID
 from student_agent.cases import CaseSet, load_case_set
 from student_agent.contracts import Contracts
-from student_agent.submission import build_manifest
+from student_agent.submission import build_manifest, timestamped_submission_path
 
 
 def write_json(path: Path, value: object) -> None:
@@ -45,3 +46,10 @@ def test_generated_manifest_matches_public_contract() -> None:
     manifest = build_manifest(case_set)
     contracts.validate_manifest(manifest)
     assert manifest["output_schema_version"] == OUTPUT_SCHEMA_VERSION
+
+
+def test_default_submission_path_contains_utc_timestamp() -> None:
+    moment = datetime(2026, 9, 25, 8, 7, 6, tzinfo=UTC)
+    assert timestamped_submission_path(Path("dist"), moment) == Path(
+        "dist/submission-20260925T080706Z.zip"
+    )
