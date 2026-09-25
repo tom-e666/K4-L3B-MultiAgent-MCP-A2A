@@ -1,0 +1,72 @@
+  + Exception Group Traceback (most recent call last):
+  |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/mnt/K4-L3B-MultiAgent-MCP-A2A/scripts/explore_dump.py", line 91, in <module>
+  |     asyncio.run(main())
+  |   File "/usr/lib/python3.10/asyncio/runners.py", line 44, in run
+  |     return loop.run_until_complete(main)
+  |   File "/usr/lib/python3.10/asyncio/base_events.py", line 649, in run_until_complete
+  |     return future.result()
+  |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/mnt/K4-L3B-MultiAgent-MCP-A2A/scripts/explore_dump.py", line 51, in main
+  |     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gw:
+  |   File "/usr/lib/python3.10/contextlib.py", line 199, in __aenter__
+  |     return await anext(self.gen)
+  |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/mnt/K4-L3B-MultiAgent-MCP-A2A/src/student_agent/mcp_gateway.py", line 50, in connect_gateway
+  |     async with (
+  |   File "/usr/lib/python3.10/contextlib.py", line 217, in __aexit__
+  |     await self.gen.athrow(typ, value, traceback)
+  |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/mcp/client/streamable_http.py", line 731, in streamable_http_client
+  |     async with (
+  |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/anyio/_backends/_asyncio.py", line 847, in __aexit__
+  |     raise BaseExceptionGroup(
+  | exceptiongroup.ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)
+  +-+---------------- 1 ----------------
+    | Traceback (most recent call last):
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpx2/_transports/default.py", line 98, in map_httpcore_exceptions
+    |     yield
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpx2/_transports/default.py", line 388, in handle_async_request
+    |     resp = await self._pool.handle_async_request(req)
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpcore2/_async/connection_pool.py", line 242, in handle_async_request
+    |     raise exc from None
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpcore2/_async/connection_pool.py", line 224, in handle_async_request
+    |     response = await connection.handle_async_request(pool_request.request)
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpcore2/_async/http_proxy.py", line 286, in handle_async_request
+    |     raise ProxyError(msg)
+    | httpcore2.ProxyError: 403 Forbidden
+    | 
+    | The above exception was the direct cause of the following exception:
+    | 
+    | Traceback (most recent call last):
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/anyio/_core/_tasks.py", line 327, in _run_coro
+    |     retval = await self._coro
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/mcp/client/streamable_http.py", line 340, in _run_request_post
+    |     await post_fn()
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/mcp/client/streamable_http.py", line 630, in handle_request_async
+    |     await self._handle_post_request(ctx)
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/mcp/client/streamable_http.py", line 355, in _handle_post_request
+    |     async with stream_within_origin(
+    |   File "/usr/lib/python3.10/contextlib.py", line 199, in __aenter__
+    |     return await anext(self.gen)
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/mcp/shared/_httpx_utils.py", line 131, in stream_within_origin
+    |     response = await client.send(request, stream=True, follow_redirects=False)
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpx2/_client.py", line 1818, in send
+    |     response = await self._send_handling_auth(
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpx2/_client.py", line 1846, in _send_handling_auth
+    |     response = await self._send_handling_redirects(
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpx2/_client.py", line 1881, in _send_handling_redirects
+    |     response = await self._send_single_request(request)
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpx2/_client.py", line 1915, in _send_single_request
+    |     response = await transport.handle_async_request(request)
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpx2/_transports/default.py", line 387, in handle_async_request
+    |     with map_httpcore_exceptions():
+    |   File "/usr/lib/python3.10/contextlib.py", line 153, in __exit__
+    |     self.gen.throw(typ, value, traceback)
+    |   File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/.local/lib/python3.10/site-packages/httpx2/_transports/default.py", line 115, in map_httpcore_exceptions
+    |     raise mapped_exc(message) from exc
+    | httpx2.ProxyError: 403 Forbidden
+    +------------------------------------
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/sessions/rcw-01jnangygzcxphpbcvjr48h7/mnt/K4-L3B-MultiAgent-MCP-A2A/scripts/explore_dump.py", line 98, in <module>
+    while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
+NameError: name 'BaseExceptionGroup' is not defined. Did you mean: 'BaseException'?

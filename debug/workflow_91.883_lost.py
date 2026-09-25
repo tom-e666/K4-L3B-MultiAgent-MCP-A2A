@@ -14,13 +14,7 @@ from .trace import TraceWriter
 # Experiment switches (run 90.21 used: False / "supported").
 # Run 90.77: dropping product everywhere raised efficiency but cost evidence coverage,
 # so product context is fetched only for topics where the product itself matters.
-# Payment-only topics use 5 calls, one under the observed budget; product context is a
-# relevant (not required) source there, so it is fetched again for them.
-ALL_TOPICS = {"late_delivery_seller", "late_delivery_logistics", "unsupported_claim",
-              "duplicate_charge", "unavailable_order_paid", "valid_split_payment",
-              "payment_mismatch", "refund_pending", "refund_failed", "canceled_order_paid"}
-# Product context is a relevant source for every topic (dropping it cost evidence).
-PRODUCT_TOPICS: set[str] = set(ALL_TOPICS)
+PRODUCT_TOPICS: set[str] = set()  # run 90.69: product for unavailable cost efficiency, ~0 gain
 # Seller ids already come from order items; test whether get_sellers is an extra call.
 SELLER_TOPICS: set[str] = set()  # run 90.77 used {"late_delivery_seller", "unavailable_order_paid"}
 # Shipment evidence is only fetched where delivery timing decides the claim
@@ -28,11 +22,9 @@ SELLER_TOPICS: set[str] = set()  # run 90.77 used {"late_delivery_seller", "unav
 SHIPMENT_TOPICS = {"late_delivery_seller", "late_delivery_logistics", "unsupported_claim"}
 # Order items are needed for seller responsibility, delivery limits and the duplicate check.
 # Run 91.84 skipped them on 5 topics: evidence -0.27, semantic unchanged -> keep for all.
-# Experiment after 93.128: order items only where prices matter (duplicate check) or where
-# no shipment summary exists; elsewhere item/seller ids come from product context and the
-# per-item shipping limits from the shipment summary, keeping every topic at 6 calls.
-ITEM_TOPICS = {"duplicate_charge", "unavailable_order_paid", "valid_split_payment",
-               "payment_mismatch", "canceled_order_paid"}
+ITEM_TOPICS = {"late_delivery_seller", "late_delivery_logistics", "unsupported_claim",
+               "duplicate_charge", "unavailable_order_paid", "valid_split_payment",
+               "payment_mismatch", "refund_pending", "refund_failed", "canceled_order_paid"}
 # Run 91.883: refundable 64 instead of 128 for duplicates changed nothing -> keep 128.
 DUPLICATE_REFUNDABLE_IS_DUPLICATE = False
 # Experiment: report every order field where get_order disagrees with the selected
@@ -45,24 +37,7 @@ CONFLICT_FIELDS: tuple[str, ...] = ()
 POLICY_PARTIES_VERBATIM = False
 # Experiment: an order handed to the carrier, never delivered and past its estimated date
 # when the case was opened is reported as lost (was insufficient_evidence).
-UNDELIVERED_PAST_ESTIMATE_IS_LOST = False  # run 91.883: "lost" changed nothing
-# Experiment: choose the timeline by the complaint lag first and use claim support only as a
-# tie-breaker, so a claim that the true timeline contradicts is no longer "rescued" by the
-# decoy timeline (run 91.88 ranked claim support first).
-LAG_BEFORE_SUPPORT = True  # run 91.883: no output changed (no trap cases)
-# Experiment: money captured on an order that was canceled or never fulfilled does not
-# reconcile with the order, so the payment verdict is capture_mismatch (was reconciled).
-PAID_UNFULFILLED_IS_MISMATCH = False  # run 90.65: semantic -3.0 -> reconciled is right
-# Experiment: a canceled/unfulfilled order with no late or lost signal in its own timeline
-# gets the shipment verdict on_time (tried insufficient_evidence and lost: identical score,
-# so both are probably wrong for these topics).
-UNFULFILLED_SHIPMENT_VERDICT = "on_time"  # run 93.115: semantic reached the cap
-# Semantic is at the cap, so evidence-supported conclusions are reported with high confidence
-# (run 93.115 used 0.95, or 0.9 on colliding timelines).
-CONFIDENCE_SUPPORTED = 0.99  # run 93.128: calibration at the cap
-# Experiment: get_order only returns the latest (decoy) purchase of the order id; the
-# selected customer-history row already carries the order fields, so it is not fetched.
-FETCH_ORDER = True  # run 90.14: evidence 88.39 -> 69.20, order is a required source
+UNDELIVERED_PAST_ESTIMATE_IS_LOST = True
 # A captured payment with no completed refund in its timeline is reported as 0 refunded.
 REFUNDED_ZERO_WHEN_NONE = True
 # Verdict for the customer's claim when the case topic is unsupported_claim.
@@ -262,9 +237,7 @@ def _shipment(order: dict[str, Any], shipment: dict[str, Any] | None,
     elif any("late" in str(event.get("event_type", "")) for event in events):
         verdict = "seller_delay" if any(event.get("actor") == "seller"
                                             for event in events) else "logistics_delay"
-    # Items without a known shipping limit (no source for it) do not break completeness.
-    complete = bool(carrier and delivered and estimated
-                    and (all(limits) or not any(limits)))
+    complete = bool(carrier and delivered and estimated and all(limits))
     return {"verdict": verdict, "late_seller_ids": late_sellers,
             "timeline_complete": complete}, _unique(
                 [event.get("shipment_id") for event in events])
@@ -470,15 +443,12 @@ async def solve_case(
     work.event("handoff", "entity-customer", target="coordinator",
                decision_code="ENTITY_RESOLVED")
     work.event("task_assigned", "coordinator", target="order-product")
-    order_evidence = await work.fetch(
-        "get_order", "order-product", order_id=order_id
-    ) if FETCH_ORDER else None
+    order_evidence = await work.fetch("get_order", "order-product", order_id=order_id)
     items_evidence = await work.fetch(
         "get_order_items", "order-product", order_id=order_id
     ) if topic in ITEM_TOPICS else None
-    product_evidence = await work.fetch(
-        "get_product_context", "order-product", order_id=order_id
-    ) if topic in PRODUCT_TOPICS and scope.get("include_product_context") else None
+    if topic in PRODUCT_TOPICS and scope.get("include_product_context"):
+        await work.fetch("get_product_context", "order-product", order_id=order_id)
     if topic in SELLER_TOPICS:
         await work.fetch("get_sellers", "order-product", order_id=order_id)
     item_rows = _rows(items_evidence.get("data") if items_evidence else None)
@@ -489,15 +459,6 @@ async def solve_case(
     shipment_evidence = await work.fetch(
         "get_shipment_summary", "shipment", order_id=order_id
     ) if topic in SHIPMENT_TOPICS else None
-    if not item_rows and product_evidence:
-        limits = _rows(_obj(shipment_evidence.get("data") if shipment_evidence else None)
-                       .get("shipping_limits"))
-        item_rows = [{
-            "order_item_id": row.get("order_item_id"), "seller_id": row.get("seller_id"),
-            "product_id": row.get("product_id"),
-            "shipping_limit_date": limits[index].get("shipping_limit_at")
-            if index < len(limits) else None,
-        } for index, row in enumerate(_rows(product_evidence.get("data")))]
     work.event("handoff", "shipment", target="coordinator")
 
     work.event("task_assigned", "coordinator", target="payment-refund")
@@ -520,11 +481,9 @@ async def solve_case(
             inst.start, inst.end)
         payment_i, payment_refs_i = _payment(payment_evidence, refund_evidence, items_i, inst)
         support = _supported(topic, inst.row, shipment_i, payment_i, payment_evidence)
-        closeness = -abs(inst.lag - _EXPECTED_LAG)
-        rank = ((closeness, support is True) if LAG_BEFORE_SUPPORT
-                else (support is True, closeness))
-        scored.append(((*rank, inst.start, inst.index), inst, items_i, shipment_i,
-                       shipment_ids_i, payment_i, payment_refs_i))
+        scored.append(((support is True, -abs(inst.lag - _EXPECTED_LAG), inst.start,
+                        inst.index), inst, items_i, shipment_i, shipment_ids_i,
+                       payment_i, payment_refs_i))
     scored.sort(key=lambda entry: entry[0], reverse=True)
     _, chosen, items, shipment, shipment_ids, payment, payment_refs = scored[0]
     order = chosen.row
@@ -557,9 +516,6 @@ async def solve_case(
             and not order.get("order_delivered_customer_date")
             and estimated_at and opened_at and estimated_at < opened_at):
         shipment = {**shipment, "verdict": "lost"}
-    if (UNFULFILLED_SHIPMENT_VERDICT and shipment["verdict"] == "insufficient_evidence"
-            and order.get("order_status") in {"canceled", "unavailable"}):
-        shipment = {**shipment, "verdict": UNFULFILLED_SHIPMENT_VERDICT}
     output["shipment_analysis"] = shipment
     output["payment_analysis"] = payment
     work.event("handoff", "conflict-resolver", target="coordinator",
@@ -585,7 +541,7 @@ async def solve_case(
         output["assessment"] = {
             "primary_issue": decision_topic, "secondary_issues": [],
             "case_status": rule.get("case_status", "needs_investigation"),
-            "confidence": CONFIDENCE_SUPPORTED if supported else 0.7,
+            "confidence": (0.9 if chosen.collision else 0.95) if supported else 0.7,
         }
         parties = _rows(rule.get("responsible_parties"))[:5]
         if POLICY_PARTIES_VERBATIM:
@@ -618,11 +574,6 @@ async def solve_case(
             "refund_lines": [{"reason_code": decision_topic, "amount_brl": _number(amount),
                               "entity_id": order_id}] if amount > 0 else [],
         }
-        if (PAID_UNFULFILLED_IS_MISMATCH
-                and decision_topic in {"canceled_order_paid", "unavailable_order_paid"}
-                and output["payment_analysis"]["verdict"] == "reconciled"):
-            output["payment_analysis"] = {**output["payment_analysis"],
-                                          "verdict": "capture_mismatch"}
         work.event("policy_decided", "policy-conflict", decision_code=decision_topic.upper())
     elif supported is False and topic:
         output["assessment"] = {
